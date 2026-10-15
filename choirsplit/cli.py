@@ -7,9 +7,8 @@ import sys
 from pathlib import Path
 
 from .audio_io import EncoderError, require_ffmpeg
-from .loaders import ScoreLoadError, load_score, supported_suffixes
-from .pipeline import Options, process_tracks
-from .score import extract_tracks
+from .loaders import ScoreLoadError, supported_suffixes
+from .pipeline import Options, load_tracks, process_tracks
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,18 +42,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Every option goes through one Options object, so the CLI and process_file agree.
+    opts = Options(
+        mode=args.mode, full_mix=args.full_mix, fmt=args.fmt, bitrate=args.bitrate,
+        bpm=args.bpm, tempo_scale=args.tempo_scale, transpose=args.transpose,
+        others_gain=args.others_gain, include_accompaniment=args.include_accompaniment,
+        split_voices=args.split_voices, split_chords=args.split_chords, only=args.only,
+    )
     try:
-        score = load_score(args.score)
-        st = extract_tracks(
-            score,
-            bpm=args.bpm,
-            tempo_scale=args.tempo_scale,
-            split_voices=args.split_voices,
-            split_chords=args.split_chords,
-            include_accompaniment=args.include_accompaniment,
-        )
-        if st.title == "Score":
-            st.title = args.score.stem
+        st = load_tracks(args.score, opts)
         if args.list:
             print(f"{st.title} ({st.duration:.1f}s)")
             for i, t in enumerate(st.tracks, start=1):
@@ -62,14 +58,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.fmt == "mp3":
             require_ffmpeg()
-        opts = Options(
-            mode=args.mode, full_mix=args.full_mix, fmt=args.fmt, bitrate=args.bitrate,
-            transpose=args.transpose, others_gain=args.others_gain,
-            include_accompaniment=args.include_accompaniment, only=args.only,
-        )
         out_dir = args.output or args.score.with_name(args.score.stem + "_tracks")
         written = process_tracks(st, out_dir, opts)
-    except (ScoreLoadError, EncoderError, ValueError) as exc:
+    except (ScoreLoadError, EncoderError, ValueError, OSError) as exc:
         print(f"choir-split: error: {exc}", file=sys.stderr)
         return 1
     print(f"{st.title}: {len(st.voices)} voices, {st.duration:.1f}s")

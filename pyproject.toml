@@ -21,3 +21,8 @@ packages = ["choirsplit"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: takes more than a few seconds (OMR, long renders)",
+    "omr: needs an optical music recognition engine (skipped when none is installed)",
+    "musescore: needs the MuseScore command line (skipped when not installed)",
+]

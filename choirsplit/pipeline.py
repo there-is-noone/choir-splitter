@@ -29,8 +29,10 @@ class Options:
     only: list[str] = field(default_factory=list)  # restrict to these voice names
 
 
-def safe_filename(name: str) -> str:
+def safe_filename(name: str, max_bytes: int = 200) -> str:
     name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip(" .")
+    # Most file systems cap names at 255 bytes; leave room for the extension.
+    name = name.encode()[:max_bytes].decode(errors="ignore").strip(" .")
     return name or "untitled"
 
 
@@ -40,6 +42,15 @@ def process_tracks(st: ScoreTracks, out_dir: Path, opts: Options) -> list[Path]:
     voices = st.voices
     if not voices:
         raise ValueError("no sung voices found in the score")
+    if not 0.0 <= opts.others_gain <= 1.0:
+        raise ValueError(f"others volume must be between 0 and 1, got {opts.others_gain}")
+    only = {o.strip().lower() for o in opts.only}
+    unknown = [o for o in opts.only if o.strip().lower() not in {t.name.lower() for t in voices}]
+    if unknown:
+        raise ValueError(
+            f"no voice named {', '.join(repr(o) for o in unknown)}; "
+            f"available: {', '.join(t.name for t in voices)}"
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     def render(track, timbre):
@@ -51,9 +62,8 @@ def process_tracks(st: ScoreTracks, out_dir: Path, opts: Options) -> list[Path]:
     voice_audio = [render(t, "voice") for t in voices]
     acc_audio = [render(t, "piano") for t in st.accompaniment]
 
-    title = safe_filename(st.title)
+    title = safe_filename(st.title, max_bytes=120)  # leaves room for " - 01 Voice (practice)"
     written: list[Path] = []
-    only = {o.lower() for o in opts.only}
 
     def emit(stem: str, audio, track_title: str) -> None:
         written.append(write_audio(
@@ -79,6 +89,13 @@ def process_tracks(st: ScoreTracks, out_dir: Path, opts: Options) -> list[Path]:
 
 def process_file(path: str | Path, out_dir: str | Path, opts: Options | None = None) -> tuple[ScoreTracks, list[Path]]:
     opts = opts or Options()
+    st = load_tracks(path, opts)
+    return st, process_tracks(st, Path(out_dir), opts)
+
+
+def load_tracks(path: str | Path, opts: Options | None = None) -> ScoreTracks:
+    """Load a score file and split it into tracks as `opts` asks (shared by the CLI)."""
+    opts = opts or Options()
     path = Path(path)
     score = load_score(path)
     st = extract_tracks(
@@ -91,4 +108,4 @@ def process_file(path: str | Path, out_dir: str | Path, opts: Options | None = N
     )
     if st.title == "Score":
         st.title = path.stem
-    return st, process_tracks(st, Path(out_dir), opts)
+    return st

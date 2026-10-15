@@ -1,3 +1,151 @@
 # choirsplit
 
-Turn a choir score into separate MP3 practice tracks for every voice.
+Turn a choir score into separate MP3 practice tracks for every voice, the
+kind of rehearsal tracks choirs hand out so each singer can learn their part.
+
+For every voice in the score you get:
+
+| File | What it is |
+| --- | --- |
+| `<title> - 01 Soprano.mp3` | the soprano line alone |
+| `<title> - 01 Soprano (practice).mp3` | soprano loud and centred, the other voices quiet and spread left/right, accompaniment softly underneath |
+| `<title> - All voices.mp3` | everything together |
+
+Any number of voices works: SATB, SSA, TTBB, 5–6 voice madrigals, and
+8-voice SSAATTBB or double-choir scores.
+
+## Install
+
+Requires Python 3.10+ and `ffmpeg` (with libmp3lame) for MP3 output.
+
+```bash
+cd choir_splitter
+python3 -m venv .venv
+.venv/bin/pip install -e '.[test]'
+```
+
+## Usage
+
+```bash
+choir-split score.musicxml                 # writes score_tracks/*.mp3
+choir-split score.mxl -o tracks/ --list    # just show which voices were detected
+choir-split score.mxl --mode practice      # only the practice mixes (+ full mix)
+choir-split score.mxl --tempo-scale 0.8    # 80 % speed for learning
+choir-split score.mxl --only "Tenor 2"     # tracks for one voice
+```
+
+| Option | Meaning |
+| --- | --- |
+| `-o DIR` | output directory (default `<score>_tracks`) |
+| `--mode solo\|practice\|both` | which per-voice tracks to write (default `both`) |
+| `--no-full-mix` | skip the all-voices mix |
+| `--format mp3\|wav` | output format (WAV needs no ffmpeg) |
+| `--bitrate 192k` | MP3 bitrate |
+| `--bpm N` | ignore the score's tempo marks and use N quarter notes per minute |
+| `--tempo-scale F` | speed factor applied to the score's tempo |
+| `--transpose N` | shift everything by N semitones |
+| `--others-volume F` | level of the other voices in practice tracks (0–1, default 0.3) |
+| `--no-accompaniment` | leave piano/organ out of the mixes |
+| `--no-split-voices` | keep a staff with several voices (e.g. S+A) as one track |
+| `--no-split-chords` | don't split hymnal-style two-note chords into upper/lower parts |
+| `--only VOICE` | only write tracks for the named voice (repeatable) |
+| `--list` | print the detected voices and exit |
+
+## Input formats
+
+| Format | Notes |
+| --- | --- |
+| MusicXML (`.musicxml`, `.xml`, `.mxl`) | best choice; export it from MuseScore, Sibelius, Finale or Dorico |
+| MuseScore (`.mscz`, `.mscx`) | read directly, MuseScore 2, 3, 4 and 5 files; no MuseScore install needed |
+| PDF and images (`.pdf`, `.png`, `.jpg`, `.tif`) | optical music recognition with Audiveris (install below) |
+| MIDI (`.mid`, `.midi`) | one track per voice works best |
+| Humdrum, ABC, MEI, Capella | anything [music21](https://www.music21.org) can read |
+
+### MuseScore files
+
+`.mscz` / `.mscx` files are read by a built-in parser: parts and staves,
+voices 1–4, chords, ties, tuplets, tempo changes, time signatures, pickup bars,
+repeats and voltas, 8va/8vb lines, and the voice names of MuseScore's
+closed-score templates. Grace notes and ornaments are skipped.
+
+If the built-in parser can't read a file (MuseScore 1.x files, or something
+unexpected), choirsplit converts it with the MuseScore program when one is
+installed (`mscore`, `musescore4`, `mscore4portable`, … on `PATH`, or the
+flatpak). Environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `CHOIRSPLIT_MUSESCORE` | path to the MuseScore executable or AppImage |
+| `CHOIRSPLIT_MUSESCORE_MODE` | `auto` (default: built-in, then MuseScore), `native` (built-in only), `cli` (always MuseScore) |
+
+### PDF and scanned scores
+
+PDFs and images are read with [Audiveris](https://github.com/Audiveris/audiveris)
+optical music recognition. Install it user-locally (no root, about 210 MB):
+
+```bash
+scripts/install_omr.sh        # needs curl, ar, tar (zstd), sha256sum, python3
+```
+
+This puts Audiveris under `~/.local/share/choirsplit/audiveris/` and English
+OCR data (for part names and titles) under `~/.local/share/choirsplit/tessdata/`.
+`AUDIVERIS_VERSION`, `OCR_LANGS="eng deu"` and `CHOIRSPLIT_HOME` change what
+and where it installs. Recognition takes about 20 s per page; results are
+cached, so a second run is instant.
+
+choirsplit cleans up the recognised score: parts are matched across systems
+by staff position, bars are aligned, two-voice hymn staves are split into
+upper and lower lines, unnamed staves are named by layout (SATB, SSAATTBB, …),
+and tenor parts written in a plain treble clef are moved down an octave. OMR
+is never perfect: check the result with `--list` and, for important scores,
+prefer MusicXML or MuseScore files.
+
+| Variable | Meaning |
+| --- | --- |
+| `CHOIRSPLIT_AUDIVERIS` | Audiveris launcher or install directory |
+| `CHOIRSPLIT_OMR_CMD` | use another OMR engine: a command with `{input}` (or `{image}`, run per page) and `{outdir}` that writes MusicXML |
+| `CHOIRSPLIT_OMR_TIMEOUT` | seconds before recognition is stopped (default 120 + 120 per page) |
+| `CHOIRSPLIT_OMR_CACHE` | cache directory, or `0` to disable the cache |
+
+### How voices are found
+
+- Each staff becomes a voice, named after the part (`Soprano`, `Tenor 2`, …).
+- A staff carrying several voices (e.g. Soprano and Alto on one staff, as voice
+  1 and voice 2) is split. Names come from the staff name: `Soprano Alto`,
+  `S A`, `SA`, `Women`, `Soprano 1 2`, `Tenor I/II`, `S1 S2`.
+- Hymnal-style staves that write two parts as two-note chords are split into
+  the upper and lower note, if the staff name tells which two parts it holds.
+- Piano/organ/harp/guitar parts are treated as accompaniment. They get no
+  track of their own but play softly in the practice and full mixes.
+- Ties are merged, grace notes skipped, repeats expanded, and tempo changes
+  followed. Every file has exactly the same length, so they line up in any
+  player or DAW.
+
+## Sound
+
+Audio is synthesised by a small built-in numpy synthesiser (vowel-like sung
+tone with light vibrato; a piano-like tone for accompaniment). No soundfont or
+external synthesiser is needed.
+
+## Development
+
+```bash
+.venv/bin/python -m pytest -q                  # full suite (OMR tests need Audiveris)
+.venv/bin/python -m pytest -q -m "not slow"     # quick run
+.venv/bin/python -m pytest -q -m slow            # slow tests only, incl. the Bach chorale sweep
+```
+
+Tests needing Audiveris (`omr`) or the MuseScore program (`musescore`) are
+skipped when those aren't installed. Fixture sources and licences are listed
+in `tests/fixtures/*/SOURCES.md`.
+
+Code layout (`choirsplit/`):
+
+- `loaders.py`: file → music21 score (dispatches to `musescore.py` / `omr.py`)
+- `score.py`: score → per-voice note lists on one tempo-mapped timeline
+- `synth.py`: note lists → audio
+- `mixer.py`: solo / practice / full mixes with panning and normalisation
+- `audio_io.py`: WAV / MP3 output
+- `musescore.py`, `mscx_utils.py`: MuseScore file reader
+- `omr.py`: PDF/image recognition with Audiveris and clean-up of its output
+- `pipeline.py`, `cli.py`: glue and command line

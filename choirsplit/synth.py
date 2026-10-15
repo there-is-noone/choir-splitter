@@ -14,6 +14,7 @@ PIANO_HARMONICS = (1.0, 0.45, 0.25, 0.12, 0.08, 0.05)
 
 ATTACK = 0.03
 RELEASE = 0.08
+END_FADE = 0.01  # fade at the very end of a render, where the last release is truncated
 VIBRATO_RATE = 5.2  # Hz
 VIBRATO_DEPTH = 0.18  # semitones
 VIBRATO_DELAY = 0.25  # seconds before vibrato fades in
@@ -78,6 +79,14 @@ def render_notes(
         n_total = body + int(RELEASE * sample_rate)
         wave = gen(midi_to_hz(ev.pitch), n_total, sample_rate)
         wave *= _envelope(body, n_total, sample_rate) * (ev.velocity / 127.0)
-        out[start:start + n_total] += wave[: len(out) - start]
+        if start < 0:  # note begins before time zero: keep only the part that sounds
+            wave, start = wave[-start:], 0
+        wave = wave[: len(out) - start]
+        out[start:start + len(wave)] += wave
     out = out[:total]
+    # The last note usually ends exactly at `duration`, so its release tail was just cut
+    # off; fade the very end out so the file doesn't stop with a click.
+    n_fade = min(int(END_FADE * sample_rate), total)
+    if n_fade > 0:
+        out[total - n_fade:] *= np.linspace(1.0, 0.0, n_fade)
     return (out * 0.25).astype(np.float32)

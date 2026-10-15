@@ -39,7 +39,17 @@ def load_score(path: str | Path) -> stream.Score:
     if isinstance(parsed, stream.Opus):
         if not parsed.scores:
             raise ScoreLoadError(f"{path.name} contains no scores")
-        parsed = parsed.scores[0]
+        scores = list(parsed.scores)
+        titles = {s.metadata.title if s.metadata else None for s in scores}
+        if len(scores) > 1 and len(titles) == 1 and all(len(s.parts) == 1 for s in scores):
+            # ABC "one tune per voice" (X:1 Superius, X:2 Altus, ...): merge into one score.
+            for s in scores:
+                alt = s.metadata.alternativeTitle if s.metadata else None
+                if alt and not s.parts[0].partName:
+                    s.parts[0].partName = alt
+            parsed = parsed.mergeScores()
+        else:
+            parsed = scores[0]
     if isinstance(parsed, stream.Part):
         score = stream.Score()
         score.insert(0, parsed)

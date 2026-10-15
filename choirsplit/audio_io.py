@@ -49,7 +49,8 @@ def write_mp3(
     ]
     for key, value in (metadata or {}).items():
         cmd += ["-metadata", f"{key}={value}"]
-    cmd.append(str(path))
+    # "file:" stops ffmpeg reading a name like "-x.mp3" as an option or "a:b" as a protocol.
+    cmd.append(f"file:{path}")
     data = np.ascontiguousarray(audio, dtype="<f4").tobytes()
     proc = subprocess.run(cmd, input=data, capture_output=True)
     if proc.returncode != 0:
