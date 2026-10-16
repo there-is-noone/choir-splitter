@@ -26,6 +26,7 @@ from music21 import (
     bar, chord, instrument, key, metadata, meter, note, pitch, spanner, stream, tempo, tie,
 )
 
+from . import platforms
 from .loaders import ScoreLoadError
 from .mscx_utils import (
     duration_ql, find_musescore_cli, fraction_to_ql, instrument_kind, parse_fraction,
@@ -80,7 +81,8 @@ def load_with_cli(path: Path) -> stream.Score:
         tmp_root = Path.home() / ".cache" / "choirsplit"
         tmp_root.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
-    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    if platforms.is_linux():  # no display needed; other builds may lack this plugin
+        env.setdefault("QT_QPA_PLATFORM", "offscreen")
     with tempfile.TemporaryDirectory(prefix="choirsplit-mscore-", dir=tmp_root) as tmp:
         out = Path(tmp) / (path.stem + ".musicxml")
         try:

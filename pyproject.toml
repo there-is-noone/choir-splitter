@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Turn choir scores into separate MP3 practice tracks for every voice"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["music21>=9", "numpy>=1.24"]
+dependencies = ["music21>=9", "numpy>=1.24", "imageio-ffmpeg>=0.5"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

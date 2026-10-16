@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -172,8 +173,29 @@ def test_write_audio_long_name(tmp_path, fmt):
 
 # --- encoder errors -------------------------------------------------------------------
 
+def test_bundled_ffmpeg_used_when_none_on_path(monkeypatch):
+    monkeypatch.setattr(audio_io.shutil, "which", lambda name: None)
+    monkeypatch.setattr(audio_io, "_bundled_ffmpeg", lambda: "/bundled/ffmpeg")
+    assert require_ffmpeg() == "/bundled/ffmpeg"
+
+
+def test_ffmpeg_on_path_wins_over_bundled(monkeypatch):
+    monkeypatch.setattr(audio_io.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(audio_io, "_bundled_ffmpeg", lambda: "/bundled/ffmpeg")
+    assert require_ffmpeg() == "/usr/bin/ffmpeg"
+
+
+def test_bundled_ffmpeg_can_encode_mp3():
+    exe = audio_io._bundled_ffmpeg()
+    if exe is None:
+        pytest.skip("imageio-ffmpeg not installed")
+    out = subprocess.run([exe, "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+    assert "libmp3lame" in out
+
+
 def test_missing_ffmpeg(monkeypatch, tmp_path):
     monkeypatch.setattr(audio_io.shutil, "which", lambda name: None)
+    monkeypatch.setattr(audio_io, "_bundled_ffmpeg", lambda: None)
     with pytest.raises(EncoderError, match="ffmpeg") as exc:
         require_ffmpeg()
     assert "--format wav" in str(exc.value)
@@ -197,6 +219,7 @@ def test_ffmpeg_failure_unwritable_dir(tmp_path):
         write_mp3(tmp_path / "missing-dir" / "x.mp3", stereo(0.1), SR)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake ffmpeg is a shell script")
 def test_ffmpeg_failure_fake_binary(monkeypatch, tmp_path):
     fake = tmp_path / "ffmpeg"
     fake.write_text("#!/bin/sh\ncat >/dev/null\necho 'Unknown encoder libmp3lame' >&2\nexit 3\n")

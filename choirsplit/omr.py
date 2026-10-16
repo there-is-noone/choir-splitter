@@ -11,12 +11,14 @@ with ``scripts/install_omr.sh``. Engine discovery, in order:
    command runs once per page, e.g. ``CHOIRSPLIT_OMR_CMD='oemer -o {outdir} {image}'``.
 2. ``CHOIRSPLIT_AUDIVERIS`` - the Audiveris launcher, or its install directory.
 3. ``Audiveris`` / ``audiveris`` on PATH.
-4. ``$CHOIRSPLIT_HOME/audiveris/bin/Audiveris`` (default ``~/.local/share/choirsplit``,
-   where the install script puts it), then ``/opt/audiveris/bin/Audiveris`` (.deb install).
+4. ``$CHOIRSPLIT_HOME/audiveris`` (default ``~/.local/share/choirsplit`` on Linux, where
+   the install script puts it), then where the official installers put it:
+   ``/opt/audiveris`` (.deb), ``C:\\Program Files\\Audiveris`` (.msi),
+   ``/Applications/Audiveris.app`` (.dmg).
 
 Other settings: ``CHOIRSPLIT_OMR_TIMEOUT`` (seconds; default scales with the page count),
 ``CHOIRSPLIT_OMR_CACHE`` (cache directory, or ``0`` to disable; default
-``$XDG_CACHE_HOME/choirsplit/omr``).
+``omr`` in choirsplit's cache directory, see ``platforms.cache_dir``).
 
 OMR output is messy in ways that matter for per-voice practice tracks, so the
 recognised MusicXML is cleaned up before it is handed on:
@@ -51,6 +53,7 @@ from pathlib import Path
 
 from music21 import clef, converter, instrument, layout, meter, note, stream, text
 
+from . import platforms
 from .score import is_accompaniment
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
@@ -59,7 +62,18 @@ MUSICXML_SUFFIXES = {".mxl", ".musicxml", ".xml"}
 # Names Audiveris (and other engines) give parts when no name was recognised.
 DEFAULT_NAME_RE = re.compile(r"^\s*(|voice|noname|piano|p\d+|part\s*\d*|staff\s*\d*|music\s*\d*)\s*$", re.I)
 
-SYSTEM_LOCATIONS = [Path("/opt/audiveris")]  # where the official .deb installs Audiveris
+
+
+def _system_locations() -> list[Path]:
+    """Where the official Audiveris installers put it (.msi, .dmg, .deb)."""
+    if platforms.is_windows():
+        return [d / "Audiveris" for d in platforms.program_dirs()]
+    if platforms.is_macos():
+        return [d / "Audiveris.app" for d in platforms.program_dirs()]
+    return [Path("/opt/audiveris")]
+
+
+SYSTEM_LOCATIONS = _system_locations()
 POLYPHONY_THRESHOLD = 0.15  # fraction of sounding time where two voices overlap
 CACHE_VERSION = "1"  # bump when the raw engine invocation changes
 _EPS = 1e-6
@@ -88,25 +102,31 @@ class Engine:
 
 
 def data_home() -> Path:
-    return Path(os.environ.get("CHOIRSPLIT_HOME") or Path.home() / ".local/share/choirsplit")
+    return platforms.data_dir()
 
 
 def install_hint() -> str:
     return (
         "PDF and image scores need an optical music recognition engine (Audiveris), "
         "and none was found.\n"
-        "Install it without root (about 190 MB, into ~/.local/share/choirsplit) with:\n"
-        "    scripts/install_omr.sh\n"
-        "or point CHOIRSPLIT_AUDIVERIS at an existing Audiveris launcher "
-        "(e.g. /opt/audiveris/bin/Audiveris), or set CHOIRSPLIT_OMR_CMD to another OMR "
+        "  Windows: the 'windowsConsole' .msi installer, macOS: the .dmg, both from\n"
+        "      https://github.com/Audiveris/audiveris/releases\n"
+        "  Linux: scripts/install_omr.sh (no root needed, about 210 MB)\n"
+        "Or point CHOIRSPLIT_AUDIVERIS at an existing Audiveris program or install folder, "
+        "or set CHOIRSPLIT_OMR_CMD to another OMR "
         "command such as 'oemer -o {outdir} {image}'.\n"
         "Alternatively export MusicXML from your notation program and use that file."
     )
 
 
+# Launcher locations inside an install folder: Linux (.deb / install script), Windows (.msi),
+# macOS (.app bundle).
+_LAUNCHERS = ("bin/Audiveris", "Audiveris", "bin/audiveris", "Audiveris.exe", "Contents/MacOS/Audiveris")
+
+
 def _audiveris_from(path: Path) -> Path | None:
     if path.is_dir():
-        for cand in (path / "bin" / "Audiveris", path / "Audiveris", path / "bin" / "audiveris"):
+        for cand in (path / rel for rel in _LAUNCHERS):
             if cand.is_file() and os.access(cand, os.X_OK):
                 return cand
         return None
@@ -114,13 +134,16 @@ def _audiveris_from(path: Path) -> Path | None:
 
 
 def _audiveris_version(exe: Path) -> str:
-    cfg = exe.resolve().parent.parent / "lib" / "app" / "Audiveris.cfg"
-    try:
-        m = re.search(r"app-version=([\w.\-]+)", cfg.read_text(errors="replace"))
+    here = exe.resolve().parent
+    # Linux: bin/../lib/app, Windows: app next to Audiveris.exe, macOS: Contents/MacOS/../app.
+    for cfg in (here.parent / "lib" / "app" / "Audiveris.cfg", here / "app" / "Audiveris.cfg",
+                here.parent / "app" / "Audiveris.cfg"):
+        try:
+            m = re.search(r"app-version=([\w.\-]+)", cfg.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
         if m:
             return m.group(1)
-    except OSError:
-        pass
     try:
         return str(int(exe.stat().st_mtime))
     except OSError:
@@ -135,11 +158,19 @@ def _audiveris_engine(exe: Path) -> Engine:
     return Engine("audiveris", [str(exe)], _audiveris_version(exe), env=env)
 
 
+def split_command(command: str) -> list[str]:
+    """Split a command line into arguments; on Windows, backslashes in paths are kept."""
+    if not platforms.is_windows():
+        return shlex.split(command)
+    tokens = shlex.split(command, posix=False)
+    return [t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'" else t for t in tokens]
+
+
 def find_engine() -> Engine | None:
     """Locate an OMR engine (see module docstring for the search order)."""
     custom = os.environ.get("CHOIRSPLIT_OMR_CMD", "").strip()
     if custom:
-        tokens = shlex.split(custom)
+        tokens = split_command(custom)
         joined = " ".join(tokens)
         if "{image}" not in joined and "{input}" not in joined:
             raise _error("CHOIRSPLIT_OMR_CMD must contain {input} or {image} (and usually {outdir})")
@@ -289,8 +320,7 @@ def _cache_root() -> Path | None:
         return None
     if env:
         return Path(env).expanduser()
-    base = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
-    return Path(base) / "choirsplit" / "omr"
+    return platforms.cache_dir() / "omr"
 
 
 def cache_key(path: Path, engine: Engine) -> str:
@@ -327,7 +357,7 @@ def _store(entry: Path, files: list[Path], stamp: str) -> None:
     staging.mkdir(parents=True)
     for i, f in enumerate(files, 1):
         shutil.copy2(f, staging / f"{i:04d}-{f.name}")
-    (staging / "done").write_text(stamp)
+    (staging / "done").write_text(stamp, encoding="utf-8")
     shutil.rmtree(entry, ignore_errors=True)
     staging.rename(entry)
 

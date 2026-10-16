@@ -52,6 +52,8 @@ def clean_env(monkeypatch, tmp_path):
 
 def make_exe(path: Path, body: str) -> Path:
     """Write an executable Python script (the fake OMR engine)."""
+    if sys.platform == "win32":
+        pytest.skip("fake engines are #! scripts, which Windows can't run directly")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body))
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
