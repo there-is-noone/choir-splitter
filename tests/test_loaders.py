@@ -122,7 +122,7 @@ def test_musescore_and_omr_files_are_dispatched(tmp_path, monkeypatch, suffix, m
 
 def test_musicxml_str_path_and_uppercase_suffix(tmp_path):
     path = write_score(build_score(*satb_parts()), tmp_path, "satb")
-    upper = tmp_path / "SATB.MUSICXML"
+    upper = tmp_path / "SATB_COPY.MUSICXML"  # a different name: macOS/Windows ignore case
     shutil.copy(path, upper)
     for p in (str(path), upper):
         score = load_score(p)

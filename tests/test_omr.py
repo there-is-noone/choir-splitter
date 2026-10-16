@@ -172,7 +172,9 @@ def test_system_location_is_last_resort(clean_env, monkeypatch):
     monkeypatch.setattr(omr, "SYSTEM_LOCATIONS", [clean_env / "opt-audiveris"])
     assert omr.find_engine().argv == [str(exe)]
     on_path = fake_audiveris(clean_env / "empty-bin" / "audiveris")
-    assert omr.find_engine().argv == [str(on_path)]
+    # PATH wins. Case-insensitive file systems (macOS) report it as "Audiveris".
+    [found] = omr.find_engine().argv
+    assert Path(found).parent == on_path.parent and Path(found).name.lower() == "audiveris"
 
 
 def test_env_audiveris_beats_path(clean_env, monkeypatch):

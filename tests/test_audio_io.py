@@ -140,7 +140,11 @@ def test_awkward_names_are_safe(tmp_path, name, fmt, monkeypatch):
     assert sorted(p.name for p in tmp_path.iterdir()) == [path.name]
 
 
-@pytest.mark.parametrize("dirname", ["http:tracks", "file:x", "-o"])
+_NO_COLON = pytest.mark.skipif(sys.platform == "win32", reason="':' is not allowed in Windows file names")
+
+
+@pytest.mark.parametrize("dirname", [pytest.param("http:tracks", marks=_NO_COLON),
+                                     pytest.param("file:x", marks=_NO_COLON), "-o"])
 def test_mp3_relative_dir_that_looks_like_protocol_or_option(tmp_path, monkeypatch, dirname):
     from pathlib import Path
 

@@ -62,7 +62,7 @@ def ffprobe(path: Path) -> dict:
     assert exe, "ffprobe not installed"
     out = subprocess.run(
         [exe, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
-        capture_output=True, check=True, text=True,
+        capture_output=True, check=True, text=True, encoding="utf-8",  # ffprobe writes UTF-8 JSON
     ).stdout
     return json.loads(out)
 
