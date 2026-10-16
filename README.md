@@ -34,6 +34,7 @@ choir-split score.mxl -o tracks/ --list    # just show which voices were detecte
 choir-split score.mxl --mode practice      # only the practice mixes (+ full mix)
 choir-split score.mxl --tempo-scale 0.8    # 80 % speed for learning
 choir-split score.mxl --only "Tenor 2"     # tracks for one voice
+choir-split scan.pdf --title "Ave Verum"   # name the files and tags yourself
 ```
 
 | Option | Meaning |
@@ -51,6 +52,7 @@ choir-split score.mxl --only "Tenor 2"     # tracks for one voice
 | `--no-split-voices` | keep a staff with several voices (e.g. S+A) as one track |
 | `--no-split-chords` | don't split hymnal-style two-note chords into upper/lower parts |
 | `--only VOICE` | only write tracks for the named voice (repeatable) |
+| `--title TITLE` | song title for the file names and the MP3 album tag (default: the score's title, else its file name) |
 | `--list` | print the detected voices and exit |
 
 ## Input formats

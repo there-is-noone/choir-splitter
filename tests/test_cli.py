@@ -231,3 +231,29 @@ def test_mp3_run_duration_and_title_tag(scores, tmp_path, capsys):
     tags = {k.lower(): v for k, v in ffprobe(path)["format"]["tags"].items()}
     assert tags["title"] == "Alto (practice)"
     assert tags["album"] == TITLE
+
+
+def test_title_option_renames_files_and_album_tag(scores, tmp_path, capsys):
+    out = tmp_path / "out"
+    rc, stdout, _ = run([scores["satb"], "-o", out, "--mode", "solo", "--only", "Bass",
+                         "--title", "  Ave Verum: take 2 "], capsys)
+    assert rc == 0
+    assert stdout.startswith("Ave Verum: take 2:")
+    # ':' is not allowed in file names on every system, so it becomes '_' there only.
+    assert names(out) == ["Ave Verum_ take 2 - 04 Bass.mp3", "Ave Verum_ take 2 - All voices.mp3"]
+    tags = {k.lower(): v for k, v in ffprobe(out / "Ave Verum_ take 2 - 04 Bass.mp3")["format"]["tags"].items()}
+    assert tags["album"] == "Ave Verum: take 2"
+    assert tags["title"] == "Bass"
+
+
+def test_title_option_shows_in_list(scores, capsys):
+    rc, stdout, _ = run([scores["satb"], "--list", "--title", "Ave Verum"], capsys)
+    assert rc == 0
+    assert stdout.splitlines()[0].startswith("Ave Verum (")
+
+
+def test_empty_title_exits_1(scores, tmp_path, capsys):
+    rc, _, err = run([scores["satb"], "-o", tmp_path / "out", "--title", "  "], capsys)
+    assert rc == 1
+    assert "title" in err
+    assert not (tmp_path / "out").exists()

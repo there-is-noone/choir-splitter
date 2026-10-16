@@ -36,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="don't split two-note chords on one staff into upper and lower parts")
     p.add_argument("--only", action="append", default=[], metavar="VOICE",
                    help="only write tracks for this voice (repeatable)")
+    p.add_argument("--title", help="song title used in file names and MP3 tags (default: from the score)")
     p.add_argument("--list", action="store_true", help="list the detected voices and exit")
     return p
 
@@ -48,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         bpm=args.bpm, tempo_scale=args.tempo_scale, transpose=args.transpose,
         others_gain=args.others_gain, include_accompaniment=args.include_accompaniment,
         split_voices=args.split_voices, split_chords=args.split_chords, only=args.only,
+        title=args.title,
     )
     try:
         st = load_tracks(args.score, opts)

@@ -27,6 +27,7 @@ class Options:
     split_chords: bool = True
     sample_rate: int = synth.SAMPLE_RATE
     only: list[str] = field(default_factory=list)  # restrict to these voice names
+    title: str | None = None  # song title for file names and tags (default: from the score)
 
 
 def safe_filename(name: str, max_bytes: int = 200) -> str:
@@ -106,6 +107,10 @@ def load_tracks(path: str | Path, opts: Options | None = None) -> ScoreTracks:
         split_chords=opts.split_chords,
         include_accompaniment=opts.include_accompaniment,
     )
-    if st.title == "Score":
+    if opts.title is not None:
+        if not opts.title.strip():
+            raise ValueError("title must not be empty")
+        st.title = opts.title.strip()
+    elif st.title == "Score":
         st.title = path.stem
     return st
