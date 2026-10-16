@@ -23,13 +23,13 @@ installed with the package, so there is nothing else to set up for MusicXML, Mus
 or MIDI scores. **Step-by-step instructions for each system, including Audiveris for
 PDFs, are in [INSTALL.md](INSTALL.md).**
 
-Quick version:
+Quick version, from inside this folder:
 
 ```bash
-pipx install "git+https://github.com/there-is-noone/projekty.git#subdirectory=choir_splitter"
+pipx install .                        # the choir-split command then works everywhere
 ```
 
-or from this folder:
+or with a virtual environment:
 
 ```bash
 python3 -m venv .venv                 # Windows: py -m venv .venv

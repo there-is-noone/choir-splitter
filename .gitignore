@@ -4,3 +4,4 @@ __pycache__/
 *_tracks/
 out/
 .pytest_cache/
+build/

@@ -38,21 +38,20 @@ Check it works:
 py --version
 ```
 
-### 2. choirsplit
+First get the `choir_splitter` folder: download the repository as a ZIP (on GitHub:
+**Code ▸ Download ZIP**) and unzip it, clone it with git, or copy it from whoever shared
+it with you.
 
-**Option A: with pipx** (no git needed; the `choir-split` command works in any folder):
+**Option A: with pipx** (recommended; afterwards `choir-split` works in any folder):
 
 ```powershell
 py -m pip install --user pipx
 py -m pipx ensurepath
 # close and reopen the terminal, then:
-pipx install "git+https://github.com/there-is-noone/projekty.git#subdirectory=choir_splitter"
+pipx install path\to\projekty\choir_splitter
 ```
 
-The pipx line needs [Git for Windows](https://git-scm.com/download/win). Without git,
-download the repository as a ZIP from GitHub, unzip it, and use option B.
-
-**Option B: from a downloaded or cloned copy:**
+**Option B: in a virtual environment inside the folder:**
 
 ```powershell
 cd path\to\projekty\choir_splitter
@@ -116,21 +115,20 @@ Check it works:
 python3 --version
 ```
 
-### 2. choirsplit
+First get the `choir_splitter` folder: download the repository as a ZIP (on GitHub:
+**Code ▸ Download ZIP**) and unzip it, clone it with git, or copy it from whoever shared
+it with you.
 
-**Option A: with pipx:**
+**Option A: with pipx** (recommended; afterwards `choir-split` works in any folder):
 
 ```bash
 brew install pipx          # or: python3 -m pip install --user pipx
 pipx ensurepath
 # close and reopen Terminal, then:
-pipx install "git+https://github.com/there-is-noone/projekty.git#subdirectory=choir_splitter"
+pipx install path/to/projekty/choir_splitter
 ```
 
-If macOS asks to install the "command line developer tools" (they provide git),
-accept.
-
-**Option B: from a downloaded or cloned copy:**
+**Option B: in a virtual environment inside the folder:**
 
 ```bash
 cd path/to/projekty/choir_splitter
@@ -182,11 +180,13 @@ Debian/Ubuntu.
 
 ### choirsplit
 
+With the `choir_splitter` folder downloaded or cloned:
+
 ```bash
-pipx install "git+https://github.com/there-is-noone/projekty.git#subdirectory=choir_splitter"
+pipx install path/to/projekty/choir_splitter
 ```
 
-or, from a clone:
+or:
 
 ```bash
 cd projekty/choir_splitter
@@ -213,6 +213,19 @@ page into `/opt/audiveris`.
 
 choirsplit finds `mscore`, `musescore`, `MuseScore4`, `mscore4portable` and similar on
 `PATH`, or the flatpak `org.musescore.MuseScore`.
+
+---
+
+## Installing straight from GitHub
+
+If the repository is public, or you are signed in to git with access to it, pipx can
+install without downloading the folder first, on any system:
+
+```bash
+pipx install "git+https://github.com/there-is-noone/projekty.git#subdirectory=choir_splitter"
+```
+
+This installs what is on the `main` branch.
 
 ---
 
