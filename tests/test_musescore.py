@@ -69,6 +69,27 @@ def test_mscz_matches_mscx():
     assert lines(tracks("satb_open.mscz")) == lines(tracks("satb_open.mscx"))
 
 
+def test_mscz_saved_by_musescore_4():
+    """A real MuseScore 4.7 .mscz: container.xml lists style, thumbnail and settings files too."""
+    with zipfile.ZipFile(FIXTURES / "satb_piano_ms47.mscz") as zf:
+        assert "audiosettings.json" in zf.namelist()
+    assert lines(tracks("satb_piano_ms47.mscz")) == lines(tracks("satb_piano.mscx"))
+
+
+def test_mscz_ignores_excerpts(tmp_path):
+    """Generated parts (Excerpts/...) must never be picked as the score."""
+    f = tmp_path / "with_parts.mscz"
+    full = (FIXTURES / "satb_open.mscx").read_bytes()
+    part = (FIXTURES / "pickup.mscx").read_bytes()
+    with zipfile.ZipFile(f, "w") as zf:
+        zf.writestr("META-INF/container.xml",
+                    '<container><rootfiles><rootfile full-path="Excerpts/Soprano/Soprano.mscx"/>'
+                    '<rootfile full-path="score.mscx"/></rootfiles></container>')
+        zf.writestr("Excerpts/Soprano/Soprano.mscx", part)
+        zf.writestr("score.mscx", full)
+    assert [t.name for t in tracks(f.name, tmp_path).voices] == SATB
+
+
 def test_satb_pitches_and_tempo():
     st = tracks("satb_open.mscx")
     soprano = st.voices[0].notes
@@ -127,6 +148,62 @@ def test_repeat_is_played_twice():
     assert st.duration == pytest.approx(10.0)
 
 
+def test_da_capo_al_fine_with_repeat():
+    # |: 1 2 (Fine) :| 3 4 (D.C. al Fine) -> 1 2 1 2 3 4 1 2, as MuseScore plays it.
+    st = tracks("dc_al_fine.mscx")
+    assert [n.pitch for n in st.voices[0].notes] == [72, 74, 72, 74, 76, 77, 72, 74]
+    assert [n.pitch for n in st.voices[1].notes] == [69, 71, 69, 71, 72, 74, 69, 71]
+    assert st.duration == pytest.approx(16.0)
+
+
+def test_da_capo_al_fine_play_repeats_repeats_again():
+    # Measured with MuseScore 4.7: "play repeats" replays the repeat bar after the jump and
+    # only stops at Fine once it is done: 1 2 1 2 3 4 1 2 1 2.
+    st = tracks("dc_al_fine_repeats.mscx")
+    assert [n.pitch for n in st.voices[0].notes] == [72, 74, 72, 74, 76, 77, 72, 74, 72, 74]
+
+
+@pytest.mark.parametrize("name,pitches", [
+    # bars: C D | E (1.) :| F (2.) | G (D.C.); MuseScore 4.7's MIDI export, measured
+    ("dc_voltas.mscx", [72, 74, 76, 72, 74, 77, 79, 72, 74, 77, 79]),  # after D.C.: last ending only
+    ("dc_voltas_repeats.mscx", [72, 74, 76, 72, 74, 77, 79, 72, 74, 76, 72, 74, 77, 79]),  # all again
+])
+def test_da_capo_with_voltas(name, pitches):
+    assert [n.pitch for n in tracks(name).voices[0].notes] == pitches
+
+
+def test_dal_segno_al_coda():
+    # 1 2(Segno) 3(To Coda) 4(D.S. al Coda) 5(Coda) -> 1 2 3 4 2 3 5.
+    st = tracks("ds_al_coda.mscx")
+    assert [n.pitch for n in st.voices[0].notes] == [72, 74, 76, 77, 74, 76, 79]
+    assert [n.start for n in st.voices[0].notes] == pytest.approx([0, 2, 4, 6, 8, 10, 12])
+
+
+def _order(n, start=(), end=None, voltas=(), markers=None, jumps=None):
+    start_rep = [i in start for i in range(n)]
+    end_rep = [(end or {}).get(i, 0) for i in range(n)]
+    marks = [set((markers or {}).get(i, ())) for i in range(n)]
+    return musescore._play_order(n, start_rep, end_rep, [musescore._Volta(*v) for v in voltas],
+                                 marks, jumps or {})
+
+
+def test_play_order_voltas():
+    # |: 0 [1. 1 :|] [2. 2] 3
+    assert _order(4, {0}, {1: 2}, [(1, 1, [1]), (2, 1, [2])]) == [0, 1, 0, 2, 3]
+
+
+def test_play_order_jump_after_voltas_takes_last_ending():
+    jump = {3: musescore._Jump("start", "end", "", False)}
+    assert _order(4, {0}, {1: 2}, [(1, 1, [1]), (2, 1, [2])], jumps=jump) == [0, 1, 0, 2, 3, 0, 2, 3]
+    jump = {3: musescore._Jump("start", "end", "", True)}  # "play repeats" ticked
+    assert _order(4, {0}, {1: 2}, [(1, 1, [1]), (2, 1, [2])], jumps=jump) == [0, 1, 0, 2, 3] * 2
+
+
+def test_play_order_bad_input_never_hangs():
+    assert _order(3, jumps={2: musescore._Jump("segno", "fine", "", False)}) == [0, 1, 2]  # no segno
+    assert len(_order(2, {0}, {1: 10 ** 9})) < 1000
+
+
 def test_title_and_names():
     score = load_score(FIXTURES / "satb_open.mscx")
     assert score.metadata.title == "Open SATB Hymn"
@@ -149,7 +226,8 @@ def test_satb_piano_template():
     assert [p.id for p in score.parts][-2:] == ["P5-Staff1", "P5-Staff2"]
 
 
-# Expected values agree with MuseScore 4.7's MusicXML export of the same files.
+# Expected values agree with MuseScore 4.7's MusicXML export of the same files (the 5.00
+# file is newer than MuseScore 4.7 can read; its values are from the native reader).
 @pytest.mark.parametrize("name,count,end,duration", [
     ("testTie.mscx", 13, 6.25, 7.5),                        # 3.01 ties
     ("tuplets.mscx", 54, 11.875, 12.5),                     # 2.06 tuplets

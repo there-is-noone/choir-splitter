@@ -171,7 +171,8 @@ def _pick_mscx_entry(zf: zipfile.ZipFile) -> str:
     """Choose the score entry name inside an open .mscz archive."""
     names = zf.namelist()
     for full_path in _container_rootfiles(zf):
-        if full_path.lower().endswith(".mscx") and full_path in names:
+        if (full_path.lower().endswith(".mscx") and full_path in names
+                and not full_path.startswith("Excerpts/")):
             return full_path
     candidates = [
         n for n in names if n.lower().endswith(".mscx") and not n.startswith("Excerpts/")

@@ -11,6 +11,8 @@ For every voice in the score you get:
 | `<title> - 01 Soprano (practice).mp3` | soprano loud and centred, the other voices quiet and spread left/right, accompaniment softly underneath |
 | `<title> - All voices.mp3` | everything together |
 
+`<title>` is the score's title, or its file name when the score has none.
+
 Any number of voices works: SATB, SSA, TTBB, 5–6 voice madrigals, and
 8-voice SSAATTBB or double-choir scores.
 
@@ -65,8 +67,9 @@ choir-split score.mxl --only "Tenor 2"     # tracks for one voice
 
 `.mscz` / `.mscx` files are read by a built-in parser: parts and staves,
 voices 1–4, chords, ties, tuplets, tempo changes, time signatures, pickup bars,
-repeats and voltas, 8va/8vb lines, and the voice names of MuseScore's
-closed-score templates. Grace notes and ornaments are skipped.
+repeats and voltas, D.C./D.S. al Fine/al Coda jumps (played the way MuseScore
+plays them), 8va/8vb lines, and the voice names of MuseScore's closed-score
+templates. Grace notes and ornaments are skipped.
 
 If the built-in parser can't read a file (MuseScore 1.x files, or something
 unexpected), choirsplit converts it with the MuseScore program when one is

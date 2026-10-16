@@ -15,6 +15,12 @@ Each one was checked against MuseScore 4.7's own MusicXML export: identical trac
 | ties_tuplets_tempo.mscx | ties within and across bars, a triplet, dots, 60 -> 120 bpm, a 3/4 bar |
 | pickup.mscx | a one-beat pickup (`len="1/4"`) in 3/4 |
 | repeat.mscx | bars 1-2 repeated |
+| dc_al_fine.mscx | repeat, Fine, D.C. al Fine (order checked against MuseScore 4.7's MIDI export) |
+| ds_al_coda.mscx | Segno, To Coda, D.S. al Coda, Coda (order checked against MuseScore 4.7's MIDI export) |
+| dc_al_fine_repeats.mscx | as dc_al_fine with "play repeats" on the D.C. (checked against MuseScore 4.7's MIDI export) |
+| dc_voltas.mscx | repeat with volta 1 / volta 2, then D.C. (checked against MuseScore 4.7's MIDI export) |
+| dc_voltas_repeats.mscx | as dc_voltas with "play repeats" on the D.C. (checked against MuseScore 4.7's MIDI export) |
+| satb_piano_ms47.mscz | satb_piano.mscx saved as .mscz by MuseScore 4.7 (thumbnail, settings, style entries) |
 
 ## MuseScore repository (github.com/musescore/MuseScore, `main`, GPL-3.0)
 

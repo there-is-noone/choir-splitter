@@ -13,6 +13,7 @@ Mode (``load(path, mode=...)`` or the CHOIRSPLIT_MUSESCORE_MODE env var):
 
 from __future__ import annotations
 
+import copy
 import os
 import subprocess
 import tempfile
@@ -163,6 +164,16 @@ class _Measure:
     events: list[_Event] = field(default_factory=list)
     start_repeat: bool = False
     end_repeat: int = 0  # number of times played; 0 = no repeat
+    markers: list[str] = field(default_factory=list)  # segno, coda, codab, fine, ...
+    jump: _Jump | None = None  # D.C. / D.S. at the end of this measure
+
+
+@dataclass
+class _Jump:
+    to: str  # marker label, or "start"
+    until: str  # marker label where playing stops (or jumps on), "end" or ""
+    continue_at: str  # marker label to continue at after `until` (al Coda)
+    play_repeats: bool
 
 
 @dataclass
@@ -247,8 +258,19 @@ class _Reader:
             for i, m in enumerate(measures):
                 start_rep[i] |= m.start_repeat
                 end_rep[i] = max(end_rep[i], m.end_repeat)
+        markers: list[set[str]] = [set() for _ in range(n_measures)]
+        jumps: dict[int, _Jump] = {}
+        for _, measures in staves:
+            for i, m in enumerate(measures):
+                markers[i].update(m.markers)
+                if m.jump is not None:
+                    jumps.setdefault(i, m.jump)
+        # D.C. / D.S. jumps: unroll the measures in playing order here (music21's own
+        # unrolling of those is unreliable); plain repeats stay as repeat barlines.
+        order = (_play_order(n_measures, start_rep, end_rep, self.voltas, markers, jumps)
+                 if jumps else None)
         for part, measures in staves:
-            self._fill_part(part, measures, start_rep, end_rep)
+            self._fill_part(part, measures, start_rep, end_rep, order)
             score.insert(0, part)
         return score
 
@@ -321,6 +343,15 @@ class _Reader:
             m.start_repeat = m_el.find("startRepeat") is not None
             if m_el.find("endRepeat") is not None:
                 m.end_repeat = max(_int(m_el.findtext("endRepeat"), 2), 2)
+            m.markers = [(mk.findtext("label") or "").strip() for mk in m_el.iter("Marker")]
+            jump_el = next(m_el.iter("Jump"), None)
+            if jump_el is not None:
+                m.jump = _Jump(
+                    to=(jump_el.findtext("jumpTo") or "start").strip() or "start",
+                    until=(jump_el.findtext("playUntil") or "").strip(),
+                    continue_at=(jump_el.findtext("continueAt") or "").strip(),
+                    play_repeats=_int(jump_el.findtext("playRepeats"), 0) == 1,
+                )
             voices = m_el.findall("voice")
             if voices:
                 for v, v_el in enumerate(voices):
@@ -581,37 +612,46 @@ class _Reader:
     # -- music21 output
 
     def _fill_part(self, part: stream.Part, measures: list[_Measure],
-                   start_rep: list[bool], end_rep: list[int]):
+                   start_rep: list[bool], end_rep: list[int], order: list[int] | None = None):
         multi_voice = any(ev.voice > 0 and not isinstance(ev.obj, note.Rest)
                           for m in measures for ev in m.events)
+        unrolled = order is not None
+        if order is None:
+            order = list(range(len(measures)))
         m21_measures = []
         offset = Fraction(0)
-        for i, m in enumerate(measures):
-            mm = stream.Measure(number=i + 1)
+        for n, i in enumerate(order):
+            if i >= len(measures):
+                continue
+            m = measures[i]
+            mm = stream.Measure(number=n + 1 if unrolled else i + 1)
             voices: dict[int, stream.Voice] = {}
             for ev in sorted(m.events, key=lambda e: (e.offset, e.voice)):
                 if ev.offset < 0:
                     continue
+                obj = copy.deepcopy(ev.obj) if unrolled else ev.obj
                 if ev.voice < 0:
-                    mm.insert(ev.offset, ev.obj)
+                    mm.insert(ev.offset, obj)
                 elif not multi_voice:
                     if ev.voice == 0:
-                        mm.insert(ev.offset, ev.obj)
+                        mm.insert(ev.offset, obj)
                 else:
                     if ev.voice not in voices:
                         voices[ev.voice] = stream.Voice(id=str(ev.voice + 1))
-                    voices[ev.voice].insert(ev.offset, ev.obj)
+                    voices[ev.voice].insert(ev.offset, obj)
             for v in sorted(voices):
                 mm.insert(0, voices[v])
-            if start_rep[i]:
+            if not unrolled and start_rep[i]:
                 mm.leftBarline = bar.Repeat(direction="start")
-            if end_rep[i]:
+            if not unrolled and end_rep[i]:
                 mm.rightBarline = bar.Repeat(direction="end", times=end_rep[i])
-            if i == 0 and measures and m.length < self._nominal_length(m):
+            if n == 0 and m.length < self._nominal_length(m):
                 mm.paddingLeft = float(self._nominal_length(m) - m.length)
             part.insert(offset, mm)
             m21_measures.append(mm)
             offset += m.length
+        if unrolled:
+            return
         for volta in self.voltas:
             span = m21_measures[volta.start:volta.start + volta.length]
             if span:
@@ -624,3 +664,67 @@ class _Reader:
             if isinstance(ev.obj, meter.TimeSignature):
                 return Fraction(ev.obj.barDuration.quarterLength).limit_denominator(1024)
         return m.length
+
+
+def _play_order(n: int, start_rep: list[bool], end_rep: list[int], voltas: list[_Volta],
+                markers: list[set[str]], jumps: dict[int, _Jump]) -> list[int]:
+    """Measure indices in playing order, following repeats, voltas and D.C./D.S. jumps
+    the way MuseScore plays them (after a jump, repeats are skipped unless the jump
+    says "play repeats", and only the last ending is played)."""
+    label_at: dict[str, int] = {}
+    for i in range(n):
+        for label in sorted(markers[i]):
+            label_at.setdefault(label, i)
+    volta_at: dict[int, _Volta] = {}
+    for v in voltas:
+        for k in range(v.start, min(v.start + v.length, n)):
+            volta_at[k] = v
+    starts = {v.start for v in voltas}
+    final = {id(v): (v.start + v.length) not in starts for v in voltas}
+
+    order: list[int] = []
+    i, section_start, pass_no = 0, 0, 1
+    taken: dict[int, int] = {}
+    used_jumps: set[int] = set()
+    repeats, came_back, ended_repeat = True, False, False
+    until = continue_at = ""
+    for _ in range(64 * n + 64):  # guard against malformed loops
+        if not 0 <= i < n:
+            break
+        if start_rep[i] and not came_back:
+            section_start, pass_no = i, 1
+        came_back = False
+        v = volta_at.get(i)
+        if v is None and ended_repeat:
+            pass_no, ended_repeat = 1, False
+        if v is not None and not (pass_no in v.numbers if repeats else final[id(v)]):
+            i += 1
+            continue
+        order.append(i)
+        if end_rep[i] and repeats:
+            if taken.get(i, 0) < end_rep[i] - 1:
+                taken[i] = taken.get(i, 0) + 1
+                i, pass_no, came_back = section_start, pass_no + 1, True
+                continue
+            taken[i] = 0
+            section_start, ended_repeat = i + 1, True
+        if until and label_at.get(until) == i:  # reached "Fine" or "To Coda"
+            if continue_at in label_at:
+                i, until, continue_at = label_at[continue_at], "", ""
+                section_start, pass_no, came_back = i, 1, True
+                continue
+            break
+        jump = jumps.get(i)
+        if jump is not None and i not in used_jumps:
+            target = 0 if jump.to == "start" else label_at.get(jump.to)
+            if target is not None:
+                used_jumps.add(i)
+                repeats = jump.play_repeats
+                taken.clear()  # repeats played again after the jump start counting afresh
+                until = "" if jump.until in ("", "end") else jump.until
+                continue_at = jump.continue_at
+                section_start = max((k for k in range(target + 1) if start_rep[k]), default=0)
+                i, pass_no, came_back = target, 1, True
+                continue
+        i += 1
+    return order

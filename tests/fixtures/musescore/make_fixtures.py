@@ -131,8 +131,23 @@ def write_score(name: str, title: str, parts: list[dict], marks: dict[int, dict]
             out.append(f"      <Measure{attr}>")
             if mark.get("startRepeat"):
                 out.append("        <startRepeat/>")
+            for label, text in mark.get("markers", []):
+                side = "repeat_right" if label in ("fine", "coda") else "repeat_left"
+                out.append(f"        <Marker>\n          <style>{side}</style>\n"
+                           f"          <text>{escape(text)}</text>\n          <label>{label}</label>\n"
+                           f"          <markerType>{label}</markerType>\n          </Marker>")
+            if "jump" in mark:
+                to, until, cont, text = mark["jump"]
+                out.append(f"        <Jump>\n          <style>repeat_right</style>\n"
+                           f"          <text>{escape(text)}</text>\n          <jumpTo>{to}</jumpTo>\n"
+                           f"          <playUntil>{until}</playUntil>\n"
+                           f"          <continueAt>{cont}</continueAt>\n"
+                           + ("          <playRepeats>1</playRepeats>\n" if mark.get("playRepeats") else "")
+                           + "          </Jump>")
             for vi, items in enumerate(voices):
                 out.append("        <voice>")
+                if vi == 0 and staff_index == 0:
+                    out.extend(volta_xml(marks, mi))
                 if vi == 0:
                     if mi == 0 or "key" in mark:
                         out.append(f"          <KeySig>\n            <concertKey>{mark.get('key', 0)}"
@@ -175,6 +190,28 @@ def write_score(name: str, title: str, parts: list[dict], marks: dict[int, dict]
                         '<?xml version="1.0" encoding="UTF-8"?>\n<container>\n  <rootfiles>\n'
                         f'    <rootfile full-path="{name}.mscx"/>\n  </rootfiles>\n</container>\n')
             zf.writestr(f"{name}.mscx", text)
+
+
+def volta_xml(marks, mi):
+    """Volta spanners starting or ending at measure mi; marks[k]["volta"] = (ending numbers, length)."""
+    lines = []
+    for start, mark in marks.items():
+        if "volta" not in mark:
+            continue
+        numbers, length = mark["volta"]
+        if mi == start + length:
+            lines.append(f'          <Spanner type="Volta">\n            <prev>\n              <location>\n'
+                         f"                <measures>-{length}</measures>\n                </location>\n"
+                         "              </prev>\n            </Spanner>")
+        if mi == start:
+            text = ",".join(str(k) for k in numbers)
+            lines.append(f'          <Spanner type="Volta">\n            <Volta>\n'
+                         f"              <beginText>{text}.</beginText>\n"
+                         f"              <endings>{text}</endings>\n              </Volta>\n"
+                         f"            <next>\n              <location>\n"
+                         f"                <measures>{length}</measures>\n                </location>\n"
+                         "              </next>\n            </Spanner>")
+    return lines
 
 
 def chord_xml(data, parsed, staff_index, mi, vi, pos) -> list[str]:
@@ -301,10 +338,43 @@ def main():
                  voice_part("Alto", ["G4/q", "G4/h G4/q", "G4/h."])],
                 {0: {"time": (3, 4), "tempo": 90}}, measure_len={0: Fraction(1, 4)})
 
-    # Repeat of bars 1-2 with first and second endings written as plain bars.
+    # Repeat of bars 1-2.
     write_score("repeat", "Repeat Test",
                 [voice_part("Soprano", ["C5/w", "D5/w", "E5/w"])],
                 {0: {"time": (4, 4), "tempo": 120, "startRepeat": True}, 1: {"endRepeat": 2}})
+
+    # Bars 1-2 repeated, Fine at bar 2, D.C. al Fine at bar 4: 1 2 1 2 3 4 1 2.
+    write_score("dc_al_fine", "Da Capo Test",
+                [voice_part("Soprano", ["C5/w", "D5/w", "E5/w", "F5/w"]),
+                 voice_part("Alto", ["A4/w", "B4/w", "C5/w", "D5/w"])],
+                {0: {"time": (4, 4), "tempo": 120, "startRepeat": True},
+                 1: {"endRepeat": 2, "markers": [("fine", "Fine")]},
+                 3: {"jump": ("start", "fine", "", "D.C. al Fine")}})
+
+    # Segno at bar 2, To Coda at bar 3, D.S. al Coda at bar 4, Coda at bar 5: 1 2 3 4 2 3 5.
+    write_score("ds_al_coda", "Dal Segno Test",
+                [voice_part("Soprano", ["C5/w", "D5/w", "E5/w", "F5/w", "G5/w"])],
+                {0: {"time": (4, 4), "tempo": 120}, 1: {"markers": [("segno", "Segno")]},
+                 2: {"markers": [("coda", "To Coda")]},
+                 3: {"jump": ("segno", "coda", "codab", "D.S. al Coda")},
+                 4: {"markers": [("codab", "Coda")]}})
+
+    # |: 1 [1. 2 :|] [2. 3] 4 D.C.: with and without "play repeats".
+    # MuseScore 4.7 plays the same order for both and for the "al Fine" variant (see SOURCES.md).
+    volta_marks = {0: {"time": (4, 4), "tempo": 120, "startRepeat": True},
+                   2: {"volta": ([1], 1), "endRepeat": 2}, 3: {"volta": ([2], 1)}}
+    volta_notes = [voice_part("Soprano", ["C5/w", "D5/w", "E5/w", "F5/w", "G5/w"])]
+    for name, extra in (("dc_voltas_repeats", {"playRepeats": True}), ("dc_voltas", {})):
+        marks_v = {k: dict(v) for k, v in volta_marks.items()}
+        marks_v[4] = {"jump": ("start", "end", "", "D.C."), **extra}
+        write_score(name, "Da Capo Voltas Test", volta_notes, marks_v)
+
+    # Same as dc_al_fine but with "play repeats" ticked on the D.C.
+    write_score("dc_al_fine_repeats", "Da Capo Test",
+                [voice_part("Soprano", ["C5/w", "D5/w", "E5/w", "F5/w"])],
+                {0: {"time": (4, 4), "tempo": 120, "startRepeat": True},
+                 1: {"endRepeat": 2, "markers": [("fine", "Fine")]},
+                 3: {"jump": ("start", "fine", "", "D.C. al Fine"), "playRepeats": True}})
 
 
 if __name__ == "__main__":

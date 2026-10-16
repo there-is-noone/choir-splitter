@@ -8,7 +8,6 @@ import statistics
 import pytest
 from music21 import converter, corpus, instrument, note, stream
 
-from choirsplit import loaders
 from choirsplit.loaders import ScoreLoadError, load_score, supported_suffixes
 from choirsplit.score import extract_tracks
 from conftest import build_part, build_score, name_tracks_for_midi, onsets_of, pitches_of, satb_parts, write_score

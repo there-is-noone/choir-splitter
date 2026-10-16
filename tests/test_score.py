@@ -68,7 +68,7 @@ def check_satb(st: ScoreTracks, score: stream.Score) -> None:
     assert all(t.kind == "voice" for t in st.tracks)
     means = [statistics.mean(pitches_of(t)) for t in st.tracks]
     assert means[0] > means[1] > means[2] > means[3], means
-    lo, hi = {"Soprano": (55, 84), "Alto": (50, 79), "Tenor": (43, 72), "Bass": (33, 67)}, None
+    lo = {"Soprano": (55, 84), "Alto": (50, 79), "Tenor": (43, 72), "Bass": (33, 67)}
     for t in st.tracks:
         assert overlaps(t) == 0, t.name
         low, high = lo[t.name]
