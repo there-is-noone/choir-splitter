@@ -42,6 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream_ in (sys.stdout, sys.stderr):
+        if hasattr(stream_, "reconfigure"):  # e.g. a Windows console or pipe in cp1252
+            stream_.reconfigure(errors="replace")
     args = build_parser().parse_args(argv)
     # Every option goes through one Options object, so the CLI and process_file agree.
     opts = Options(

@@ -18,12 +18,22 @@ Any number of voices works: SATB, SSA, TTBB, 5–6 voice madrigals, and
 
 ## Install
 
-Requires Python 3.10+ and `ffmpeg` (with libmp3lame) for MP3 output.
+Works on **Windows, macOS and Linux** with Python 3.10+. MP3 encoding (ffmpeg) is
+installed with the package, so there is nothing else to set up for MusicXML, MuseScore
+or MIDI scores. **Step-by-step instructions for each system, including Audiveris for
+PDFs, are in [INSTALL.md](INSTALL.md).**
+
+Quick version, from inside this folder:
 
 ```bash
-cd choir_splitter
-python3 -m venv .venv
-.venv/bin/pip install -e '.[test]'
+pipx install .                        # the choir-split command then works everywhere
+```
+
+or with a virtual environment:
+
+```bash
+python3 -m venv .venv                 # Windows: py -m venv .venv
+.venv/bin/pip install .               # Windows: .venv\Scripts\python -m pip install .
 ```
 
 ## Usage
@@ -42,7 +52,7 @@ choir-split scan.pdf --title "Ave Verum"   # name the files and tags yourself
 | `-o DIR` | output directory (default `<score>_tracks`) |
 | `--mode solo\|practice\|both` | which per-voice tracks to write (default `both`) |
 | `--no-full-mix` | skip the all-voices mix |
-| `--format mp3\|wav` | output format (WAV needs no ffmpeg) |
+| `--format mp3\|wav` | output format |
 | `--bitrate 192k` | MP3 bitrate |
 | `--bpm N` | ignore the score's tempo marks and use N quarter notes per minute |
 | `--tempo-scale F` | speed factor applied to the score's tempo |
@@ -86,10 +96,16 @@ flatpak). Environment variables:
 ### PDF and scanned scores
 
 PDFs and images are read with [Audiveris](https://github.com/Audiveris/audiveris)
-optical music recognition. Install it user-locally (no root, about 210 MB):
+optical music recognition.
+- **Windows:** install the official `windowsConsole` `.msi`.
+- **macOS:** install the `.dmg`.
+
+choirsplit finds both in their default folders (see [INSTALL.md](INSTALL.md)).
+
+On Linux, install it user-locally (no root, about 210 MB):
 
 ```bash
-scripts/install_omr.sh        # needs curl, ar, tar (zstd), sha256sum, python3
+scripts/install_omr.sh        # Linux x86-64; needs curl, ar, tar (zstd), sha256sum, python3
 ```
 
 This puts Audiveris under `~/.local/share/choirsplit/audiveris/` and English
@@ -135,13 +151,16 @@ external synthesiser is needed.
 ## Development
 
 ```bash
+.venv/bin/pip install -e ".[test]"             # Windows: .venv\Scripts\python -m pip install -e ".[test]"
 .venv/bin/python -m pytest -q                  # full suite (OMR tests need Audiveris)
 .venv/bin/python -m pytest -q -m "not slow"     # quick run
 .venv/bin/python -m pytest -q -m slow            # slow tests only, incl. the Bach chorale sweep
 ```
 
 Tests needing Audiveris (`omr`) or the MuseScore program (`musescore`) are
-skipped when those aren't installed. Fixture sources and licences are listed
+skipped when those aren't installed. The suite runs on Linux, macOS and Windows in
+GitHub Actions (`.github/workflows/choirsplit.yml`); a few tests that fake programs
+with shell scripts are skipped on Windows. Fixture sources and licences are listed
 in `tests/fixtures/*/SOURCES.md`.
 
 Code layout (`choirsplit/`):
@@ -154,3 +173,4 @@ Code layout (`choirsplit/`):
 - `musescore.py`, `mscx_utils.py`: MuseScore file reader
 - `omr.py`: PDF/image recognition with Audiveris and clean-up of its output
 - `pipeline.py`, `cli.py`: glue and command line
+- `platforms.py`: per-OS data/cache folders and where installers put Audiveris and MuseScore

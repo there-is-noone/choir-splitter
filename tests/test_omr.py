@@ -52,6 +52,8 @@ def clean_env(monkeypatch, tmp_path):
 
 def make_exe(path: Path, body: str) -> Path:
     """Write an executable Python script (the fake OMR engine)."""
+    if sys.platform == "win32":
+        pytest.skip("fake engines are #! scripts, which Windows can't run directly")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body))
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -170,7 +172,9 @@ def test_system_location_is_last_resort(clean_env, monkeypatch):
     monkeypatch.setattr(omr, "SYSTEM_LOCATIONS", [clean_env / "opt-audiveris"])
     assert omr.find_engine().argv == [str(exe)]
     on_path = fake_audiveris(clean_env / "empty-bin" / "audiveris")
-    assert omr.find_engine().argv == [str(on_path)]
+    # PATH wins. Case-insensitive file systems (macOS) report it as "Audiveris".
+    [found] = omr.find_engine().argv
+    assert Path(found).parent == on_path.parent and Path(found).name.lower() == "audiveris"
 
 
 def test_env_audiveris_beats_path(clean_env, monkeypatch):

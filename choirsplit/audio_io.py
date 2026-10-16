@@ -15,13 +15,25 @@ class EncoderError(RuntimeError):
 
 
 def require_ffmpeg() -> str:
+    """ffmpeg on PATH, else the one bundled with the imageio-ffmpeg package (all platforms)."""
     exe = shutil.which("ffmpeg")
     if exe is None:
+        exe = _bundled_ffmpeg()
+    if exe is None:
         raise EncoderError(
-            "ffmpeg was not found on PATH; install it (e.g. `sudo dnf install ffmpeg-free`) "
-            "or use --format wav"
+            "ffmpeg was not found: reinstall choirsplit (it brings ffmpeg via the imageio-ffmpeg "
+            "package), install ffmpeg yourself, or use --format wav"
         )
     return exe
+
+
+def _bundled_ffmpeg() -> str | None:
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:  # not installed, or no binary for this platform
+        return None
 
 
 def write_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:
