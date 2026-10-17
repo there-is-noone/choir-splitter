@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +11,10 @@ from . import mixer, synth
 from .audio_io import write_audio
 from .loaders import load_score
 from .score import ScoreTracks, extract_tracks
+
+MAX_TRANSPOSE = 48  # semitones either way
+# Device names Windows refuses as file names, with or without an extension.
+_WINDOWS_RESERVED = re.compile(r"(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])")
 
 
 @dataclass
@@ -29,22 +34,42 @@ class Options:
     only: list[str] = field(default_factory=list)  # restrict to these voice names
     title: str | None = None  # song title for file names and tags (default: from the score)
 
+    def validate(self) -> None:
+        """Raise ValueError for a setting that can't work, before any slow loading starts."""
+        if self.mode not in ("solo", "practice", "both"):
+            raise ValueError(f"unknown mode {self.mode!r}")
+        if self.fmt not in ("mp3", "wav"):
+            raise ValueError(f"unsupported output format: {self.fmt}")
+        if not 0.0 <= self.others_gain <= 1.0:  # also rejects NaN
+            raise ValueError(f"others volume must be between 0 and 1, got {self.others_gain}")
+        if self.bpm is not None and not (math.isfinite(self.bpm) and self.bpm > 0):
+            raise ValueError(f"bpm must be a positive number, got {self.bpm}")
+        if not (math.isfinite(self.tempo_scale) and self.tempo_scale > 0):
+            raise ValueError(f"tempo scale must be a positive number, got {self.tempo_scale}")
+        if abs(self.transpose) > MAX_TRANSPOSE:
+            raise ValueError(f"transpose must be within {MAX_TRANSPOSE} semitones, got {self.transpose}")
+        if self.title is not None and not self.title.strip():
+            raise ValueError("title must not be empty")
+
 
 def safe_filename(name: str, max_bytes: int = 200) -> str:
     name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip(" .")
     # Most file systems cap names at 255 bytes; leave room for the extension.
     name = name.encode()[:max_bytes].decode(errors="ignore").strip(" .")
-    return name or "untitled"
+    name = name or "untitled"
+    stem = name.split(".")[0].rstrip(" ")
+    return f"_{name}" if _WINDOWS_RESERVED.fullmatch(stem) else name
 
 
 def process_tracks(st: ScoreTracks, out_dir: Path, opts: Options) -> list[Path]:
-    if opts.mode not in ("solo", "practice", "both"):
-        raise ValueError(f"unknown mode {opts.mode!r}")
+    opts.validate()
     voices = st.voices
     if not voices:
         raise ValueError("no sung voices found in the score")
-    if not 0.0 <= opts.others_gain <= 1.0:
-        raise ValueError(f"others volume must be between 0 and 1, got {opts.others_gain}")
+    if opts.transpose:
+        pitches = [n.pitch + opts.transpose for t in st.tracks for n in t.notes]
+        if pitches and not (0 <= min(pitches) and max(pitches) <= 127):
+            raise ValueError(f"transposing by {opts.transpose} moves notes outside the MIDI range 0-127")
     only = {o.strip().lower() for o in opts.only}
     unknown = [o for o in opts.only if o.strip().lower() not in {t.name.lower() for t in voices}]
     if unknown:
@@ -97,6 +122,7 @@ def process_file(path: str | Path, out_dir: str | Path, opts: Options | None = N
 def load_tracks(path: str | Path, opts: Options | None = None) -> ScoreTracks:
     """Load a score file and split it into tracks as `opts` asks (shared by the CLI)."""
     opts = opts or Options()
+    opts.validate()
     path = Path(path)
     score = load_score(path)
     st = extract_tracks(
@@ -108,8 +134,6 @@ def load_tracks(path: str | Path, opts: Options | None = None) -> ScoreTracks:
         include_accompaniment=opts.include_accompaniment,
     )
     if opts.title is not None:
-        if not opts.title.strip():
-            raise ValueError("title must not be empty")
         st.title = opts.title.strip()
     elif st.title == "Score":
         st.title = path.stem

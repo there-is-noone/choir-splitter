@@ -56,7 +56,7 @@ choir-split scan.pdf --title "Ave Verum"   # name the files and tags yourself
 | `--bitrate 192k` | MP3 bitrate |
 | `--bpm N` | ignore the score's tempo marks and use N quarter notes per minute |
 | `--tempo-scale F` | speed factor applied to the score's tempo |
-| `--transpose N` | shift everything by N semitones |
+| `--transpose N` | shift everything by N semitones (at most 48 either way; notes must stay within MIDI 0–127) |
 | `--others-volume F` | level of the other voices in practice tracks (0–1, default 0.3) |
 | `--no-accompaniment` | leave piano/organ out of the mixes |
 | `--no-split-voices` | keep a staff with several voices (e.g. S+A) as one track |

@@ -55,14 +55,15 @@ def main(argv: list[str] | None = None) -> int:
         title=args.title,
     )
     try:
+        opts.validate()
+        if args.fmt == "mp3" and not args.list:
+            require_ffmpeg()  # fail now, not after a slow PDF recognition
         st = load_tracks(args.score, opts)
         if args.list:
             print(f"{st.title} ({st.duration:.1f}s)")
             for i, t in enumerate(st.tracks, start=1):
                 print(f"  {i:2d}. {t.name} [{t.kind}] {len(t.notes)} notes")
             return 0
-        if args.fmt == "mp3":
-            require_ffmpeg()
         out_dir = args.output or args.score.with_name(args.score.stem + "_tracks")
         written = process_tracks(st, out_dir, opts)
     except (ScoreLoadError, EncoderError, ValueError, OSError) as exc:
