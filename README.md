@@ -117,7 +117,10 @@ cached, so a second run is instant.
 choirsplit cleans up the recognised score: parts are matched across systems
 by staff position, bars are aligned, two-voice hymn staves are split into
 upper and lower lines, unnamed staves are named by layout (SATB, SSAATTBB, …),
-and tenor parts written in a plain treble clef are moved down an octave. OMR
+and tenor parts written in a plain treble clef are moved down an octave.
+Stray notes OMR reads next to a voice's whole-bar rest (often a piano note
+head or tie just outside the staff) are dropped, and augmentation dots OMR
+missed are restored where the notes line up with the other staves. OMR
 is never perfect: check the result with `--list` and, for important scores,
 prefer MusicXML or MuseScore files.
 

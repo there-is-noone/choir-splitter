@@ -34,6 +34,8 @@ recognised MusicXML is cleaned up before it is handed on:
 * Spurious voices (e.g. a whole-bar rest in voice 1 plus the notes in voice 2) are
   merged back into one line; real two-voices-per-staff writing is kept.
 * If no staff carries a name, staves are named by layout (S/A/T/B, SSAATTBB, ...).
+* Stray notes next to a sung staff's printed whole-bar rest are dropped, and missed
+  augmentation dots are restored where note positions line up with the other staves.
 """
 
 from __future__ import annotations
@@ -572,6 +574,121 @@ def clip_measure(m: stream.Measure, length: float) -> None:
             el.duration.quarterLength = length - start
 
 
+# ---- missed augmentation dots
+
+DOT_X_TOLERANCE = 6.0  # MusicXML tenths; noteheads struck together line up within this
+
+
+def _x(el) -> float | None:
+    x = getattr(el.style, "absoluteX", None) if el.hasStyleInformation else None
+    return float(x) if isinstance(x, (int, float)) else None
+
+
+def _lines(m: stream.Measure) -> list[list]:
+    """The rhythmic lines of a measure: its direct notes/rests, and each Voice's."""
+    out = []
+    for container in [m, *m.voices]:
+        els = [e for e in container.notesAndRests if float(e.duration.quarterLength) > 0]
+        if els:
+            out.append(els)
+    return out
+
+
+def _complete_lines(measures: list[stream.Measure], length: float) -> list[tuple[float | None, float, float, bool]]:
+    """(x position, onset, duration, is a note) of every note/rest in the lines of these
+    measures that fill the bar exactly."""
+    ref = []
+    for m in measures:
+        for line in _lines(m):
+            total = sum(float(e.duration.quarterLength) for e in line)
+            if abs(total - length) > _EPS:
+                continue
+            for e in line:
+                ref.append((_x(e), float(e.offset), float(e.duration.quarterLength), not e.isRest))
+    return ref
+
+
+def _repair_line(line: list, ref: list[tuple[float | None, float, float, bool]], length: float) -> bool:
+    """Add the dot OMR missed to notes of an under-full line, if the line's note heads
+    line up with the onsets of the complete lines in the same system and adding a dot
+    (and nothing else) to some notes makes every note start where its head is printed.
+
+    Lengthening the *last* note is only done when the complete lines confirm it: at
+    least two of their notes start and end with it and nothing starts during the
+    added time. Otherwise the gap is more likely a rest OMR missed (a half note and
+    an unrecognised quarter rest, not a dotted half)."""
+    if any(e.duration.tuplets or e.duration.isGrace for e in line):
+        return False
+    durs = [float(e.duration.quarterLength) for e in line]
+    if sum(durs) > length - _EPS or float(line[0].offset) > _EPS:
+        return False  # complete, or a voice that only starts later in the bar
+    onsets = []
+    for k, e in enumerate(line):
+        x = _x(e)
+        if x is None:
+            return False
+        hits = {round(o, 4) for rx, o, _, _ in ref if rx is not None and abs(rx - x) <= DOT_X_TOLERANCE}
+        if len(hits) > 1:
+            return False  # ambiguous
+        if not hits:
+            if k == 0:
+                onsets.append(0.0)
+                continue
+            return False
+        onsets.append(hits.pop())
+    if onsets[0] != 0.0 or any(b <= a + _EPS for a, b in zip(onsets, onsets[1:])):
+        return False
+    new = [b - a for a, b in zip(onsets, onsets[1:])] + [length - onsets[-1]]
+    changed = []
+    for e, old, nd in zip(line, durs, new):
+        if abs(nd - old) < _EPS:
+            continue
+        if abs(nd - 1.5 * old) < _EPS and e.duration.dots == 0 and e.duration.type not in ("complex", "inexpressible"):
+            changed.append(e)
+            continue
+        return False  # anything but a single missing dot: leave the bar alone
+    if not changed:
+        return False
+    if changed[-1] is line[-1]:
+        start, old_end = onsets[-1], onsets[-1] + durs[-1]
+        if any(old_end - _EPS <= o < length - _EPS for _, o, _, _ in ref):
+            return False
+        if sum(1 for _, o, d, is_note in ref
+               if is_note and abs(o - start) < _EPS and abs(o + d - length) < _EPS) < 2:
+            return False
+    for e in changed:
+        e.duration.dots = 1
+    for e, onset in zip(line, onsets):
+        site = e.activeSite
+        site.setElementOffset(e, onset)
+    for container in {id(e.activeSite): e.activeSite for e in line}.values():
+        container.coreElementsChanged()
+    return True
+
+
+def repair_missing_dots(seg: Segment, lengths: list[float]) -> int:
+    """Restore augmentation dots OMR missed (a dotted quarter read as a quarter).
+
+    A missed dot leaves a line short of the bar and pulls its later notes early. Within
+    one system, notes struck together are printed at the same x position on every
+    staff, so the complete lines of the bar tell where each note of the short line
+    really starts. Only lines where every note then lines up and the only differences
+    are single missing dots are changed. Returns the number of lines repaired.
+    """
+    repaired = 0
+    for i, length in zip(seg.measure_range, lengths):
+        measures = [ms[i] for u in seg.units for p in u.staves
+                    for ms in [_measures(p)] if i < len(ms)]
+        ref = None
+        for m in measures:
+            for line in _lines(m):
+                if sum(float(e.duration.quarterLength) for e in line) < length - _EPS:
+                    if ref is None:
+                        ref = _complete_lines(measures, length)
+                    repaired += _repair_line(line, ref, length)
+    return repaired
+
+
 def _rest_measure(length: float) -> stream.Measure:
     m = stream.Measure()
     r = note.Rest(quarterLength=length)
@@ -646,6 +763,7 @@ def assemble(scores: list[stream.Score], title_hint: str | None = None) -> strea
     previous_source: list[list[int | None]] = [[None] * n for n in n_staves]
     for seg_index, (seg, mapping) in enumerate(zip(segments, mappings)):
         lengths = _nominal_lengths(seg)
+        repair_missing_dots(seg, lengths)
         slot_unit = {k: u for u, k in zip(seg.units, mapping)}
         for local, (i, length) in enumerate(zip(seg.measure_range, lengths)):
             number += 1
@@ -770,6 +888,46 @@ def simplify_voices(part: stream.Part) -> bool:
     return True
 
 
+def _has_notes(m: stream.Measure | None) -> bool:
+    return m is not None and any(True for _ in _note_elements(m))
+
+
+def drop_notes_under_bar_rests(part: stream.Part) -> int:
+    """Remove stray notes OMR put on a sung staff in a bar that shows a whole-bar rest.
+
+    Audiveris sometimes reads a piano note head, ledger line or tie just below/above a
+    resting voice staff as a note in a second voice next to the printed whole-bar rest
+    (e.g. the bass "singing" in the piano introduction). A whole-bar rest (MusicXML
+    ``<rest measure="yes">``) means the staff is silent, so on a single-line staff whose
+    neighbouring bars are silent too, the other voice's notes are dropped. Real
+    two-voice staves (one voice resting while the other sings) are left alone.
+    Returns the number of bars cleaned.
+    """
+    measures = _measures(part)
+    if _polyphony(measures) >= POLYPHONY_THRESHOLD:
+        return 0
+    cleaned = 0
+    for k, m in enumerate(measures):
+        voices = list(m.voices)
+        if len(voices) < 2 or m.notes:
+            continue
+        resting = [v for v in voices if not v.notes and any(
+            getattr(r, "fullMeasure", False) is True for r in v.getElementsByClass(note.Rest))]
+        if not resting:
+            continue
+        prev_m = measures[k - 1] if k > 0 else None
+        next_m = measures[k + 1] if k + 1 < len(measures) else None
+        if _has_notes(prev_m) or _has_notes(next_m):
+            continue
+        bar_rest = copy.deepcopy(next(r for r in resting[0].getElementsByClass(note.Rest)
+                                      if getattr(r, "fullMeasure", False) is True))
+        for v in voices:
+            m.remove(v)
+        m.insert(0, bar_rest)
+        cleaned += 1
+    return cleaned
+
+
 def tidy_voices(part: stream.Part) -> int:
     """Clean up OMR voices on one staff; return how many sung lines it carries (1 or 2).
 
@@ -781,6 +939,7 @@ def tidy_voices(part: stream.Part) -> int:
     * a single voice written mostly in two-note chords also counts as two lines (score.py
       splits those top/bottom when the staff is named for two voices).
     """
+    drop_notes_under_bar_rests(part)
     if simplify_voices(part):
         return 2 if _chordal(_measures(part)) else 1
     revoice_two_lines(part)
