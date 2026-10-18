@@ -366,6 +366,31 @@ def test_results_are_cached_by_file_hash(clean_env, monkeypatch, satb_xml):
     assert len(log.read_text().splitlines()) == 3
 
 
+def test_omr_dpi_reaches_audiveris_and_the_cache_key(clean_env, monkeypatch, satb_xml):
+    log = clean_env / "calls.jsonl"
+    fake_audiveris(clean_env / "empty-bin" / "Audiveris", {"{stem}.musicxml": satb_xml}, log=log)
+    monkeypatch.setenv("CHOIRSPLIT_OMR_CACHE", str(clean_env / "cache"))
+    pdf = clean_env / "d.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    load_score(pdf)
+    load_score(pdf, omr_dpi=400)
+    load_score(pdf, omr_dpi=400)  # cached separately from the default resolution
+    monkeypatch.setenv("CHOIRSPLIT_OMR_DPI", "400")
+    load_score(pdf)  # the environment variable means the same
+    calls = [json.loads(x)["args"] for x in log.read_text().splitlines()]
+    assert len(calls) == 2
+    assert "-constant" not in calls[0]
+    assert calls[1][calls[1].index("-constant") + 1] == f"{omr.AUDIVERIS_PDF_RESOLUTION}=400"
+    assert omr.cache_key(pdf, omr.find_engine()) != omr.cache_key(pdf, omr.find_engine(), 400)
+
+
+@pytest.mark.parametrize("value", ["abc", "50", "5000"])
+def test_bad_omr_dpi_environment_variable(monkeypatch, value):
+    monkeypatch.setenv("CHOIRSPLIT_OMR_DPI", value)
+    with pytest.raises(ScoreLoadError, match="CHOIRSPLIT_OMR_DPI"):
+        omr.omr_dpi()
+
+
 # --------------------------------------------------------------------------- post-processing
 
 

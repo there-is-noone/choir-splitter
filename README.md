@@ -45,6 +45,7 @@ choir-split score.mxl --mode practice      # only the practice mixes (+ full mix
 choir-split score.mxl --tempo-scale 0.8    # 80 % speed for learning
 choir-split score.mxl --only "Tenor 2"     # tracks for one voice
 choir-split scan.pdf --title "Ave Verum"   # name the files and tags yourself
+choir-split scan.pdf --check               # which bars of a PDF reading to check
 ```
 
 | Option | Meaning |
@@ -64,6 +65,9 @@ choir-split scan.pdf --title "Ave Verum"   # name the files and tags yourself
 | `--only VOICE` | only write tracks for the named voice (repeatable) |
 | `--title TITLE` | song title for the file names and the MP3 album tag (default: the score's title, else its file name) |
 | `--list` | print the detected voices and exit |
+| `--check` | list the bars that look wrong (and, for PDFs, what was repaired) and exit |
+| `--export-musicxml FILE` | also save the score as MusicXML, e.g. to correct a PDF reading in MuseScore |
+| `--omr-dpi N` | resolution to read PDFs at (default: Audiveris's 300) |
 
 ## Input formats
 
@@ -118,11 +122,56 @@ choirsplit cleans up the recognised score: parts are matched across systems
 by staff position, bars are aligned, two-voice hymn staves are split into
 upper and lower lines, unnamed staves are named by layout (SATB, SSAATTBB, …),
 and tenor parts written in a plain treble clef are moved down an octave.
-Stray notes OMR reads next to a voice's whole-bar rest (often a piano note
-head or tie just outside the staff) are dropped, and augmentation dots OMR
-missed are restored where the notes line up with the other staves. OMR
-is never perfect: check the result with `--list` and, for important scores,
-prefer MusicXML or MuseScore files.
+Misreadings are repaired where the printed page leaves no doubt. Notes struck
+together are printed at the same horizontal position on every staff of a system,
+so when one voice's bar comes up short:
+- augmentation dots OMR missed are restored;
+- notes pulled early by a missed rest are moved back to where they are printed.
+
+Stray notes are dropped when OMR took them from the piano into a voice:
+- a note next to a voice's whole-bar rest (often a piano note head or tie just outside the staff);
+- a note far outside the voice's range, on the piano side of the staff.
+
+Pitches are never changed.
+
+### When recognition isn't perfect
+
+OMR is never perfect. `--check` lists what was repaired and which bars still look
+wrong, with the page and system to find them in the PDF:
+
+```
+$ choir-split lullaby.pdf --check
+Repaired automatically (4):
+  all bars         Tenor  fixed: sung an octave lower (treble clef read without its small 8)
+  bar 2 (p1, s1)   Bass   fixed: dropped stray notes beside a whole-bar rest
+  bar 31 (p2, s2)  Alto   fixed: moved 1 note to where they are printed (missed rest or note length)
+  bar 93 (p6, s2)  Alto   fixed: restored 1 missed dot
+Please check (7):
+  bar 32 (p2, s2)  Alto   suspect: notes fill 2 of 3 beats (missed dot or rest?)
+  bar 32 (p2, s2)  Bass   suspect: notes fill 2 of 3 beats (missed dot or rest?)
+  ...
+```
+
+Bars are flagged when:
+- **Short:** a voice's notes run out before the end of the bar.
+- **Out of range:** a note is far outside the voice's range.
+- **Big leap:** a jump is much larger than the voice makes anywhere else.
+- **Out of step:** the voice's rhythm breaks away from the others in a passage where they all move together.
+
+A normal run prints a one-line reminder when the recognised score has such bars.
+
+To fix them for good, save the cleaned score, correct it in MuseScore (free), and make
+the tracks from the corrected file. That file loads without OMR from then on:
+
+```bash
+choir-split lullaby.pdf --export-musicxml lullaby.musicxml --list
+# open lullaby.musicxml in MuseScore, fix the bars --check listed, save
+choir-split lullaby.musicxml
+```
+
+If a scan reads badly, try another resolution with `--omr-dpi`. Audiveris renders PDFs at
+300 dpi by default. Higher is not automatically better: on our test scores, 400 dpi
+read worse than 300. Results for each resolution are cached separately.
 
 | Variable | Meaning |
 | --- | --- |
@@ -130,6 +179,7 @@ prefer MusicXML or MuseScore files.
 | `CHOIRSPLIT_OMR_CMD` | use another OMR engine: a command with `{input}` (or `{image}`, run per page) and `{outdir}` that writes MusicXML |
 | `CHOIRSPLIT_OMR_TIMEOUT` | seconds before recognition is stopped (default 120 + 120 per page) |
 | `CHOIRSPLIT_OMR_CACHE` | cache directory, or `0` to disable the cache |
+| `CHOIRSPLIT_OMR_DPI` | resolution PDFs are read at, like `--omr-dpi` |
 
 ### How voices are found
 
@@ -175,5 +225,6 @@ Code layout (`choirsplit/`):
 - `audio_io.py`: WAV / MP3 output
 - `musescore.py`, `mscx_utils.py`: MuseScore file reader
 - `omr.py`: PDF/image recognition with Audiveris and clean-up of its output
+- `check.py`: bars that look misread (`--check`)
 - `pipeline.py`, `cli.py`: glue and command line
 - `platforms.py`: per-OS data/cache folders and where installers put Audiveris and MuseScore

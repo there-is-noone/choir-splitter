@@ -50,12 +50,14 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from music21 import clef, converter, instrument, layout, meter, note, stream, text
 
 from . import platforms
+from .check import Issue, voice_range
 from .score import is_accompaniment
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
@@ -78,6 +80,8 @@ def _system_locations() -> list[Path]:
 SYSTEM_LOCATIONS = _system_locations()
 POLYPHONY_THRESHOLD = 0.15  # fraction of sounding time where two voices overlap
 CACHE_VERSION = "1"  # bump when the raw engine invocation changes
+# Audiveris setting for the resolution PDF pages are rendered at (its default is 300 dpi).
+AUDIVERIS_PDF_RESOLUTION = "org.audiveris.omr.image.ImageLoading.pdfResolution"
 _EPS = 1e-6
 
 
@@ -282,16 +286,21 @@ def _run(argv: list[str], timeout: float, env: dict[str, str], what: str) -> Non
 _run.last_output = ""
 
 
-def run_engine(engine: Engine, path: Path, outdir: Path, timeout: float | None = None) -> list[Path]:
-    """Run OMR on `path`, return the produced MusicXML files in score order."""
+def run_engine(engine: Engine, path: Path, outdir: Path, timeout: float | None = None,
+               dpi: int | None = None) -> list[Path]:
+    """Run OMR on `path`, return the produced MusicXML files in score order. `dpi` is the
+    resolution a PDF is rendered at (default: Audiveris's own, 300 for {image} engines)."""
     timeout = default_timeout(path) if timeout is None else timeout
     outdir.mkdir(parents=True, exist_ok=True)
     if engine.name == "audiveris":
-        argv = [*engine.argv, "-batch", "-export", "-output", str(outdir), "--", str(path)]
+        options = []
+        if dpi is not None and path.suffix.lower() == ".pdf":
+            options = ["-constant", f"{AUDIVERIS_PDF_RESOLUTION}={dpi}"]
+        argv = [*engine.argv, "-batch", "-export", *options, "-output", str(outdir), "--", str(path)]
         _run(argv, timeout, engine.env, "Audiveris")
     else:
         if engine.per_page and path.suffix.lower() == ".pdf":
-            pages = rasterize_pdf(path, outdir / "_pages")
+            pages = rasterize_pdf(path, outdir / "_pages", dpi=dpi or 300)
             if not pages:
                 raise _error(f"{path.name}: no pages could be rendered")
         else:
@@ -325,29 +334,31 @@ def _cache_root() -> Path | None:
     return platforms.cache_dir() / "omr"
 
 
-def cache_key(path: Path, engine: Engine) -> str:
+def cache_key(path: Path, engine: Engine, dpi: int | None = None) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     h.update(engine.cache_tag.encode())
+    if dpi is not None:  # (the default keeps the keys of existing cache entries)
+        h.update(f"|dpi={dpi}".encode())
     return h.hexdigest()[:32]
 
 
-def recognise(path: Path, engine: Engine) -> list[stream.Score]:
+def recognise(path: Path, engine: Engine, dpi: int | None = None) -> list[stream.Score]:
     """Run OMR on `path` (or reuse the cached result) and parse the MusicXML it produced."""
     root = _cache_root()
-    entry = root / cache_key(path, engine) if root else None
+    entry = root / cache_key(path, engine, dpi) if root else None
     if entry is not None and (entry / "done").exists():
         files = collect_outputs(entry)
         if files:
             return parse_outputs(files)
     with tempfile.TemporaryDirectory(prefix="choirsplit-omr-") as tmp:
-        files = run_engine(engine, path, Path(tmp) / "out")
+        files = run_engine(engine, path, Path(tmp) / "out", dpi=dpi)
         scores = parse_outputs(files)
         if entry is not None:
             try:
-                _store(entry, files, f"{path.name}\n{engine.cache_tag}\n")
+                _store(entry, files, f"{path.name}\n{engine.cache_tag}\n{dpi or ''}\n")
             except OSError as exc:  # a read-only cache must not break loading
                 print(f"choirsplit: could not cache OMR result: {exc}", file=sys.stderr)
     return scores
@@ -385,12 +396,29 @@ def parse_outputs(files: list[Path]) -> list[stream.Score]:
 # --------------------------------------------------------------------------- loading
 
 
-def load(path: Path) -> stream.Score:
+def omr_dpi(dpi: int | None = None) -> int | None:
+    """The resolution to recognise PDFs at: `dpi`, else $CHOIRSPLIT_OMR_DPI, else None
+    (the engine's default)."""
+    if dpi is not None:
+        return dpi
+    env = os.environ.get("CHOIRSPLIT_OMR_DPI", "").strip()
+    if not env:
+        return None
+    try:
+        value = int(env)
+    except ValueError:
+        raise _error(f"CHOIRSPLIT_OMR_DPI must be a whole number, got {env!r}") from None
+    if not 100 <= value <= 1200:
+        raise _error(f"CHOIRSPLIT_OMR_DPI must be between 100 and 1200, got {value}")
+    return value
+
+
+def load(path: Path, dpi: int | None = None) -> stream.Score:
     path = Path(path)
     engine = find_engine()
     if engine is None:
         raise _error(f"cannot read {path.name}: " + install_hint())
-    scores = recognise(path, engine)
+    scores = recognise(path, engine, omr_dpi(dpi))
     if not scores:
         raise _error(f"OMR found no music in {path.name}")
     return assemble(scores, title_hint=path.stem)
@@ -414,6 +442,7 @@ class Segment:
     """A run of measures (one system, or a whole score without layout info)."""
     units: list[Unit]
     measure_range: range  # measure indices into each staff's measure list
+    new_page: bool = False  # the system starts a new page
 
 
 def _measures(part: stream.Part) -> list[stream.Measure]:
@@ -471,11 +500,14 @@ def segments_of(score: stream.Score) -> list[Segment]:
     if n_measures == 0:
         return []
     starts = {0}
+    pages = set()
     for g in groups:
         for p in g:
             for i, m in enumerate(_measures(p)):
                 if any(getattr(x, "isNew", False) for x in m.getElementsByClass((layout.SystemLayout, layout.PageLayout))):
                     starts.add(i)
+                if any(getattr(x, "isNew", False) for x in m.getElementsByClass(layout.PageLayout)):
+                    pages.add(i)
     bounds = sorted(starts) + [n_measures]
     segments = []
     for a, b in zip(bounds, bounds[1:]):
@@ -496,7 +528,7 @@ def segments_of(score: stream.Score) -> list[Segment]:
             abbr = (g[0].partAbbreviation or "").strip()
             units.append(Unit(list(g), name, abbr, tuple(clefs), name_key(name) or name_key(abbr)))
         if units:
-            segments.append(Segment(units, range(a, b)))
+            segments.append(Segment(units, range(a, b), new_page=a in pages))
     return segments
 
 
@@ -563,15 +595,20 @@ def _nominal_lengths(seg: Segment) -> list[float]:
     return out
 
 
-def clip_measure(m: stream.Measure, length: float) -> None:
-    """Drop or shorten notes/rests that run past the end of a `length`-quarter measure."""
+def clip_measure(m: stream.Measure, length: float) -> bool:
+    """Drop or shorten notes/rests that run past the end of a `length`-quarter measure.
+    Returns True if a note (not just a rest) was cut."""
+    cut = False
     for el in list(m.recurse().notesAndRests):
         start = float(el.getOffsetInHierarchy(m))
         end = start + float(el.duration.quarterLength)
         if start >= length - _EPS:
             el.activeSite.remove(el)
+            cut |= not el.isRest
         elif end > length + _EPS:
             el.duration.quarterLength = length - start
+            cut |= not el.isRest
+    return cut
 
 
 # ---- missed augmentation dots
@@ -608,7 +645,7 @@ def _complete_lines(measures: list[stream.Measure], length: float) -> list[tuple
     return ref
 
 
-def _repair_line(line: list, ref: list[tuple[float | None, float, float, bool]], length: float) -> bool:
+def _repair_line(line: list, ref: list[tuple[float | None, float, float, bool]], length: float) -> int:
     """Add the dot OMR missed to notes of an under-full line, if the line's note heads
     line up with the onsets of the complete lines in the same system and adding a dot
     (and nothing else) to some notes makes every note start where its head is printed.
@@ -616,9 +653,9 @@ def _repair_line(line: list, ref: list[tuple[float | None, float, float, bool]],
     Lengthening the *last* note is only done when the complete lines confirm it: at
     least two of their notes start and end with it and nothing starts during the
     added time. Otherwise the gap is more likely a rest OMR missed (a half note and
-    an unrecognised quarter rest, not a dotted half)."""
+    an unrecognised quarter rest, not a dotted half). Returns the number of dots added."""
     if any(e.duration.tuplets or e.duration.isGrace for e in line):
-        return False
+        return 0
     durs = [float(e.duration.quarterLength) for e in line]
     if sum(durs) > length - _EPS or float(line[0].offset) > _EPS:
         return False  # complete, or a voice that only starts later in the bar
@@ -663,10 +700,13 @@ def _repair_line(line: list, ref: list[tuple[float | None, float, float, bool]],
         site.setElementOffset(e, onset)
     for container in {id(e.activeSite): e.activeSite for e in line}.values():
         container.coreElementsChanged()
-    return True
+    return len(changed)
 
 
-def repair_missing_dots(seg: Segment, lengths: list[float]) -> int:
+Report = Callable[[int, int, int, str], None]  # (measure index, unit index, staff index, detail)
+
+
+def repair_missing_dots(seg: Segment, lengths: list[float], report: Report | None = None) -> int:
     """Restore augmentation dots OMR missed (a dotted quarter read as a quarter).
 
     A missed dot leaves a line short of the bar and pulls its later notes early. Within
@@ -677,16 +717,95 @@ def repair_missing_dots(seg: Segment, lengths: list[float]) -> int:
     """
     repaired = 0
     for i, length in zip(seg.measure_range, lengths):
-        measures = [ms[i] for u in seg.units for p in u.staves
-                    for ms in [_measures(p)] if i < len(ms)]
+        located = _bar_measures(seg, i)
+        measures = [m for _, _, m in located]
         ref = None
-        for m in measures:
+        for u, s, m in located:
             for line in _lines(m):
                 if sum(float(e.duration.quarterLength) for e in line) < length - _EPS:
                     if ref is None:
                         ref = _complete_lines(measures, length)
-                    repaired += _repair_line(line, ref, length)
+                    dots = _repair_line(line, ref, length)
+                    repaired += bool(dots)
+                    if dots and report is not None:
+                        report(i, u, s, f"restored {dots} missed dot{'s' if dots > 1 else ''}")
     return repaired
+
+
+def _retime_line(line: list, ref: list[tuple[float | None, float, float, bool]], length: float) -> int:
+    """Move the notes of an under-full line to the onsets their note heads line up with
+    in the complete lines of the system, filling the gaps with rests. For a rest (or a
+    note length) OMR missed in mid-bar, which pulls every later note early.
+
+    Note lengths are kept as printed; the line is only changed if every note lines up
+    with exactly one onset, no note moves earlier, and no note would then run into the
+    next one or past the bar line. Returns the number of notes moved."""
+    if any(e.duration.tuplets or e.duration.isGrace for e in line):
+        return 0
+    if sum(float(e.duration.quarterLength) for e in line) > length - _EPS or float(line[0].offset) > _EPS:
+        return 0
+    notes = [e for e in line if not e.isRest]
+    if not notes:
+        return 0
+    onsets = []
+    for e in notes:
+        x = _x(e)
+        hits = {round(o, 4) for rx, o, _, _ in ref
+                if x is not None and rx is not None and abs(rx - x) <= DOT_X_TOLERANCE}
+        if not hits and e is line[0]:
+            hits = {0.0}  # nothing else starts with the first note: it stays on the downbeat
+        if len(hits) != 1:
+            return 0
+        onsets.append(hits.pop())
+    moved = 0
+    for k, (e, onset) in enumerate(zip(notes, onsets)):
+        next_onset = onsets[k + 1] if k + 1 < len(notes) else length
+        if (onset < float(e.offset) - _EPS or next_onset <= onset + _EPS
+                or onset + float(e.duration.quarterLength) > next_onset + _EPS):
+            return 0
+        moved += abs(onset - float(e.offset)) > _EPS
+    if not moved:
+        return 0
+    site = line[0].activeSite
+    for e in line:
+        if e.isRest:
+            site.remove(e)
+    pos = 0.0
+    for e, onset in zip(notes, onsets):
+        if onset > pos + _EPS:
+            site.insert(pos, note.Rest(quarterLength=onset - pos))
+        site.setElementOffset(e, onset)
+        pos = onset + float(e.duration.quarterLength)
+    site.coreElementsChanged()
+    return moved
+
+
+def repair_onsets(seg: Segment, lengths: list[float], report: Report | None = None) -> int:
+    """Re-time lines that are still short of the bar after `repair_missing_dots`, using
+    the x positions of their note heads (see `_retime_line`). Returns lines repaired."""
+    repaired = 0
+    for i, length in zip(seg.measure_range, lengths):
+        located = _bar_measures(seg, i)
+        ref = None
+        for u, s, m in located:
+            for line in _lines(m):
+                if len({id(e.activeSite) for e in line}) != 1:
+                    continue
+                if sum(float(e.duration.quarterLength) for e in line) < length - _EPS:
+                    if ref is None:
+                        ref = _complete_lines([m for _, _, m in located], length)
+                    moved = _retime_line(line, ref, length)
+                    repaired += bool(moved)
+                    if moved and report is not None:
+                        report(i, u, s, f"moved {moved} note{'s' if moved > 1 else ''} to where "
+                                        "they are printed (missed rest or note length)")
+    return repaired
+
+
+def _bar_measures(seg: Segment, i: int) -> list[tuple[int, int, stream.Measure]]:
+    """(unit index, staff index, measure) of measure `i` on every staff of a segment."""
+    return [(u, s, ms[i]) for u, unit in enumerate(seg.units) for s, p in enumerate(unit.staves)
+            for ms in [_measures(p)] if i < len(ms)]
 
 
 def _rest_measure(length: float) -> stream.Measure:
@@ -721,8 +840,17 @@ def _best_name(names: list[str]) -> str:
 
 
 def assemble(scores: list[stream.Score], title_hint: str | None = None) -> stream.Score:
-    """Merge recognised pages/movements into one score with one part per voice group."""
-    segments = [seg for s in scores for seg in segments_of(s)]
+    """Merge recognised pages/movements into one score with one part per voice group.
+
+    The result carries ``omr_issues`` (the repairs made, as ``check.Issue``) and
+    ``omr_locations`` (measure number -> (page, system) in the recognised pages).
+    """
+    segments = []
+    for s in scores:
+        segs = segments_of(s)
+        if segs:
+            segs[0].new_page = True  # each recognised file/movement starts on a new page
+        segments.extend(segs)
     if not segments:
         raise _error("OMR output contains no measures")
     n_logical = max(len(seg.units) for seg in segments)
@@ -758,15 +886,27 @@ def assemble(scores: list[stream.Score], title_hint: str | None = None) -> strea
             staves.append(p)
         out_parts.append(staves)
 
+    # Repairs, logged per (logical part, staff) and named once the parts have their names.
+    log: list[tuple[int | None, int, int, str, str]] = []  # (bar, part, staff, kind, detail)
+    locations: dict[int, tuple[int, int]] = {}
     offset = 0.0
     number = 0
+    page = system = 0
     previous_source: list[list[int | None]] = [[None] * n for n in n_staves]
-    for seg_index, (seg, mapping) in enumerate(zip(segments, mappings)):
+    for seg, mapping in zip(segments, mappings):
+        page, system = (page + 1, 1) if seg.new_page else (page, system + 1)
         lengths = _nominal_lengths(seg)
-        repair_missing_dots(seg, lengths)
+        first = number + 1 - seg.measure_range.start  # measure index -> number
+
+        def report(i, u, s, detail, kind="fixed", mapping=mapping, first=first):
+            log.append((first + i, mapping[u], s, kind, detail))
+
+        repair_missing_dots(seg, lengths, report)
+        repair_onsets(seg, lengths, report)
         slot_unit = {k: u for u, k in zip(seg.units, mapping)}
-        for local, (i, length) in enumerate(zip(seg.measure_range, lengths)):
+        for i, length in zip(seg.measure_range, lengths):
             number += 1
+            locations[number] = (page, system)
             for k in range(n_logical):
                 u = slot_unit.get(k)
                 for s, dest in enumerate(out_parts[k]):
@@ -777,7 +917,8 @@ def assemble(scores: list[stream.Score], title_hint: str | None = None) -> strea
                         if previous_source[k][s] != id(src):
                             _carry_context(src, src_ms[i], m)
                             previous_source[k][s] = id(src)
-                        clip_measure(m, length)
+                        if clip_measure(m, length):
+                            log.append((number, k, s, "suspect", "notes ran past the end of the bar and were cut"))
                     else:
                         m = _rest_measure(length)
                         previous_source[k][s] = None
@@ -788,20 +929,46 @@ def assemble(scores: list[stream.Score], title_hint: str | None = None) -> strea
     result = stream.Score()
     md = copy.deepcopy(scores[0].metadata) if scores[0].metadata is not None else None
     hymn = _closed_score(out_parts)
+    acc = [is_accompaniment(staves[0]) and not hymn for staves in out_parts]
     lines: dict[int, int] = {}
-    for staves in out_parts:
-        for p in staves:
-            if is_accompaniment(p) and not hymn:
+    slots = []  # (logical part, staff) of each part, in score order
+    for k, staves in enumerate(out_parts):
+        for s, p in enumerate(staves):
+            if acc[k]:
                 lines[id(p)] = 1  # piano & co. are played as written
             else:
-                lines[id(p)] = tidy_voices(p)
+                strays: list[int] = []
+                drop_range_strays(p, below=k + 1 < len(acc) and acc[k + 1], above=k > 0 and acc[k - 1],
+                                  log=strays)
+                dropped: list[int] = []
+                lines[id(p)] = tidy_voices(p, dropped)
+                log.extend((n, k, s, "fixed", "dropped a note outside the voice's range next to the "
+                            "accompaniment") for n in strays)
+                log.extend((n, k, s, "fixed", "dropped stray notes beside a whole-bar rest") for n in dropped)
             result.insert(0, p)
+            slots.append((k, s))
     name_unnamed_parts(result, lines)
-    for p in result.parts:
-        fix_tenor_octave(p)
+    part_names = {}
+    grouped: dict[int, list[stream.Part]] = {}
+    for p, (k, s) in zip(result.parts, slots):
+        part_names.setdefault((k, s), p.partName or f"Part {k + 1}")
+        grouped.setdefault(k, []).append(p)
+    for staves in grouped.values():
+        if len(staves) > 1 and all(isinstance(p, stream.PartStaff) for p in staves):
+            # Keeps a grand staff one part when the score is saved as MusicXML.
+            result.insert(0, layout.StaffGroup(staves, name=staves[0].partName, symbol="brace"))
+    for p, (k, s) in zip(result.parts, slots):
+        if fix_tenor_octave(p):
+            log.append((None, k, s, "fixed", "sung an octave lower (treble clef read without its small 8)"))
     if md is not None:
         result.metadata = md
     _fix_title(result, scores[0], title_hint)
+    result.omr_issues = [
+        Issue(bar, part_names.get((k, s), f"Part {k + 1}"), kind, detail,
+              *(locations.get(bar, (None, None)) if bar is not None else (None, None)))
+        for bar, k, s, kind, detail in sorted(log, key=lambda e: (e[0] or 0, e[1], e[2]))
+        if not acc[k]]  # the accompaniment isn't sung: its clean-up doesn't need checking
+    result.omr_locations = locations
     return result
 
 
@@ -892,7 +1059,7 @@ def _has_notes(m: stream.Measure | None) -> bool:
     return m is not None and any(True for _ in _note_elements(m))
 
 
-def drop_notes_under_bar_rests(part: stream.Part) -> int:
+def drop_notes_under_bar_rests(part: stream.Part, log: list[int] | None = None) -> int:
     """Remove stray notes OMR put on a sung staff in a bar that shows a whole-bar rest.
 
     Audiveris sometimes reads a piano note head, ledger line or tie just below/above a
@@ -901,7 +1068,7 @@ def drop_notes_under_bar_rests(part: stream.Part) -> int:
     ``<rest measure="yes">``) means the staff is silent, so on a single-line staff whose
     neighbouring bars are silent too, the other voice's notes are dropped. Real
     two-voice staves (one voice resting while the other sings) are left alone.
-    Returns the number of bars cleaned.
+    Returns the number of bars cleaned; their measure numbers are appended to `log`.
     """
     measures = _measures(part)
     if _polyphony(measures) >= POLYPHONY_THRESHOLD:
@@ -925,10 +1092,56 @@ def drop_notes_under_bar_rests(part: stream.Part) -> int:
             m.remove(v)
         m.insert(0, bar_rest)
         cleaned += 1
+        if log is not None:
+            log.append(m.number)
     return cleaned
 
 
-def tidy_voices(part: stream.Part) -> int:
+def drop_range_strays(part: stream.Part, below: bool, above: bool, log: list[int] | None = None) -> int:
+    """Remove notes OMR took from a neighbouring accompaniment staff into a sung staff.
+
+    A piano note head printed just below the bass staff (or above the soprano staff)
+    can be read as a note of the voice. On a single-line staff named for its voice, a
+    note is dropped when it lies outside that voice's range on the side of the
+    accompaniment staff (`below` / `above`) *and* it is the only note of the bar or
+    sounds at the same time as another note of the staff. Returns the number of bars
+    cleaned; their measure numbers are appended to `log`.
+    """
+    rng = voice_range(part.partName or "") if (below or above) and not _is_default_name(part.partName) else None
+    if rng is None:
+        return 0
+    measures = _measures(part)
+    replaced = []  # (container, rest, note) so the change can be undone
+    bars = []
+    for m in measures:
+        elements = [(off, el) for _, off, el in _note_elements(m)]
+        bad = []
+        for off, el in elements:
+            ps = [p.ps for p in el.pitches]
+            if not ((below and max(ps) < rng[0]) or (above and min(ps) > rng[1])):
+                continue
+            end = off + float(el.duration.quarterLength)
+            others = [(o, e) for o, e in elements if e is not el]
+            if not others or any(o < end - _EPS and o + float(e.duration.quarterLength) > off + _EPS
+                                 for o, e in others):
+                bad.append(el)
+        for el in bad:
+            site, rest = el.activeSite, note.Rest(quarterLength=el.duration.quarterLength)
+            site.replace(el, rest)
+            replaced.append((site, rest, el))
+        if bad:
+            bars.append(m.number)
+    # Without the strays the staff must be a single line; a real two-voice staff keeps all.
+    if replaced and _polyphony(measures) >= POLYPHONY_THRESHOLD:
+        for site, rest, el in replaced:
+            site.replace(rest, el)
+        return 0
+    if log is not None:
+        log.extend(bars)
+    return len(bars)
+
+
+def tidy_voices(part: stream.Part, log: list[int] | None = None) -> int:
     """Clean up OMR voices on one staff; return how many sung lines it carries (1 or 2).
 
     * voice splits that never sound together are merged into one line;
@@ -938,8 +1151,10 @@ def tidy_voices(part: stream.Part) -> int:
       voice, which would otherwise create extra tracks or silence the alto;
     * a single voice written mostly in two-note chords also counts as two lines (score.py
       splits those top/bottom when the staff is named for two voices).
+
+    Measure numbers of bars where stray notes were dropped are appended to `log`.
     """
-    drop_notes_under_bar_rests(part)
+    drop_notes_under_bar_rests(part, log)
     if simplify_voices(part):
         return 2 if _chordal(_measures(part)) else 1
     revoice_two_lines(part)

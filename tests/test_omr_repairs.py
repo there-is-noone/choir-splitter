@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from choirsplit import omr
+from choirsplit.loaders import load_score
 from choirsplit.score import extract_tracks
 
 DIVISIONS = 4  # per quarter
@@ -218,3 +219,104 @@ def test_ambiguous_alignment_is_left_alone(tmp_path):
         six_eight([["C4:4@24 C4:2@88 B3:4@122"]], tenor=[["A4:4@24 F4:2@88 G4:2@120 G4:4@124"]]),
         beats=6, beat_type=8))
     assert rhythm(by_name(merged)["Alto"])[0][-1] == ("B3", 1.5, 1.0)
+
+
+# --------------------------------------------------------------------------- missed rests
+
+
+def missed_rest_parts(short):
+    """4/4: soprano and alto print 'half, eighth rest, three eighths'; `short` is the
+    third staff's bar."""
+    return [
+        {"name": "Soprano", "clef": "G", "bars": [["B4:8@16 r:2@89 B4:2@122 B4:2@161 B4:2@193"]]},
+        {"name": "Alto", "clef": "G", "bars": [["D4:8@18 r:2@89 B3:2@122 D4:2@162 E4:2@194"]]},
+        {"name": "Soprano 2", "clef": "G", "bars": [[short]]},
+    ]
+
+
+def test_missed_rest_in_mid_bar_is_restored(tmp_path):
+    """The Lord of the Rings suite, bar 26: the eighth rest after the half note was not
+    recognised, so the three eighths came in half a beat early. Their note heads line up
+    with the other staves' eighths, which puts them back on beats 2.5, 3 and 3.5."""
+    merged = assemble_xml(tmp_path, audiveris_xml(missed_rest_parts("F4:8@17 B4:2@122 B4:2@161 B4:2@194")))
+    assert rhythm(by_name(merged)["Soprano 2"]) == [
+        [("F4", 0.0, 2.0), ("B4", 2.5, 0.5), ("B4", 3.0, 0.5), ("B4", 3.5, 0.5)]]
+    assert [(i.bar, i.voice, i.kind) for i in merged.omr_issues] == [(1, "Soprano 2", "fixed")]
+    assert "moved 3 notes" in merged.omr_issues[0].detail
+
+
+def test_notes_are_never_moved_earlier(tmp_path):
+    """A note head lining up with an *earlier* onset contradicts the printed lengths: the
+    bar is left alone (and reported by the check instead)."""
+    parts = [
+        {"name": "Soprano", "clef": "G", "bars": [["B4:4@16 C5:6.@60 D5:6.@122"]]},
+        {"name": "Alto", "clef": "G", "bars": [["D4:4@16 E4:6.@60 F4:6.@122"]]},
+        {"name": "Soprano 2", "clef": "G", "bars": [["F4:8@17 G4:2@60 A4:2@122"]]},
+    ]
+    merged = assemble_xml(tmp_path, audiveris_xml(parts))
+    assert rhythm(by_name(merged)["Soprano 2"]) == [[("F4", 0.0, 2.0), ("G4", 2.0, 0.5), ("A4", 2.5, 0.5)]]
+    assert merged.omr_issues == []
+
+
+def test_retiming_needs_x_positions(tmp_path):
+    merged = assemble_xml(tmp_path, audiveris_xml(missed_rest_parts("F4:8 B4:2 B4:2 B4:2")))
+    assert rhythm(by_name(merged)["Soprano 2"])[0][1] == ("B4", 2.0, 0.5)
+
+
+# --------------------------------------------------------------------------- piano notes in a voice
+
+
+def test_piano_note_below_the_bass_is_dropped(tmp_path):
+    """A piano note head under the bass staff read as a second bass voice (E1, far below
+    any bass) sounding with the bass's own note, or alone in a bar the bass rests."""
+    bass = [["C3:12.@20"], ["D3:12.@20", "E1:12.@20"], ["F1:4@20 r:8@60"]]
+    merged = assemble_xml(tmp_path, audiveris_xml(satb_piano(bass), beats=3))
+    assert [n[0] for bar in rhythm(by_name(merged)["Bass"]) for n in bar] == ["C3", "D3"]
+    assert [(i.bar, i.voice) for i in merged.omr_issues] == [(2, "Bass"), (3, "Bass")]
+    assert all("outside the voice's range" in i.detail for i in merged.omr_issues)
+
+
+def test_low_bass_notes_that_are_sung_are_kept(tmp_path):
+    """D2 is low but in range; G1 is below it but neither alone nor sounding with
+    another bass note, so there is no sign it belongs to the piano."""
+    bass = [["D2:12.@20"], ["C3:4@20 G1:8@60"], ["C3:12.@20"]]
+    merged = assemble_xml(tmp_path, audiveris_xml(satb_piano(bass), beats=3))
+    assert [n[0] for bar in rhythm(by_name(merged)["Bass"]) for n in bar] == ["D2", "C3", "G1", "C3"]
+
+
+def test_low_notes_on_a_staff_not_next_to_the_piano_are_kept(tmp_path):
+    tenor = [["C3:12.@20"], ["D3:12.@20", "C1:12.@20"], ["C3:12.@20"]]
+    merged = assemble_xml(tmp_path, audiveris_xml(satb_piano([["R"]] * 3, tenor_bars=tenor), beats=3))
+    assert "C1" in [n[0] for bar in rhythm(by_name(merged)["Tenor"]) for n in bar]
+
+
+# --------------------------------------------------------------------------- repair log
+
+
+def test_repairs_are_logged_with_voice_and_place(tmp_path):
+    merged = assemble_xml(tmp_path, audiveris_xml(six_eight([["C4:4@24 C4:2@88 B3:4@122"]]),
+                                                  beats=6, beat_type=8))
+    tenor, issue = merged.omr_issues  # (the treble-clef tenor is also sung an octave lower)
+    assert (tenor.bar, tenor.voice) == (None, "Tenor")
+    assert (issue.bar, issue.voice, issue.kind, issue.detail) == (1, "Alto", "fixed", "restored 1 missed dot")
+    assert (issue.page, issue.system) == (1, 1)
+    assert merged.omr_locations == {1: (1, 1)}
+
+
+def test_stray_note_and_tenor_octave_are_logged(tmp_path):
+    tenor = [["C5:12.@20"], ["D5:12.@20"], ["E5:12.@20"]]
+    bass = [["R"], ["R", "F2:12.@14"], ["R"]]
+    merged = assemble_xml(tmp_path, audiveris_xml(satb_piano(bass, tenor_bars=tenor), beats=3))
+    assert [(i.bar, i.voice, i.detail.split(" (")[0]) for i in merged.omr_issues] == [
+        (None, "Tenor", "sung an octave lower"),
+        (2, "Bass", "dropped stray notes beside a whole-bar rest"),
+    ]
+
+
+def test_grand_staff_stays_one_part_when_saved(tmp_path):
+    merged = assemble_xml(tmp_path, audiveris_xml(satb_piano([["C3:12.@20"]] * 3), beats=3))
+    out = tmp_path / "saved.musicxml"
+    merged.write("musicxml", fp=str(out))
+    st = extract_tracks(load_score(out))
+    assert [t.name for t in st.accompaniment] == ["Piano"]
+    assert [t.name for t in st.voices] == ["Bass"]
