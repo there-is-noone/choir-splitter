@@ -52,6 +52,8 @@ def clean_env(monkeypatch, tmp_path):
 
 def make_exe(path: Path, body: str) -> Path:
     """Write an executable Python script (the fake OMR engine)."""
+    if sys.platform == "win32":
+        pytest.skip("fake engines are #! scripts, which Windows can't run directly")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body))
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -170,7 +172,9 @@ def test_system_location_is_last_resort(clean_env, monkeypatch):
     monkeypatch.setattr(omr, "SYSTEM_LOCATIONS", [clean_env / "opt-audiveris"])
     assert omr.find_engine().argv == [str(exe)]
     on_path = fake_audiveris(clean_env / "empty-bin" / "audiveris")
-    assert omr.find_engine().argv == [str(on_path)]
+    # PATH wins. Case-insensitive file systems (macOS) report it as "Audiveris".
+    [found] = omr.find_engine().argv
+    assert Path(found).parent == on_path.parent and Path(found).name.lower() == "audiveris"
 
 
 def test_env_audiveris_beats_path(clean_env, monkeypatch):
@@ -360,6 +364,31 @@ def test_results_are_cached_by_file_hash(clean_env, monkeypatch, satb_xml):
     monkeypatch.setenv("CHOIRSPLIT_OMR_CACHE", "0")
     load_score(pdf)
     assert len(log.read_text().splitlines()) == 3
+
+
+def test_omr_dpi_reaches_audiveris_and_the_cache_key(clean_env, monkeypatch, satb_xml):
+    log = clean_env / "calls.jsonl"
+    fake_audiveris(clean_env / "empty-bin" / "Audiveris", {"{stem}.musicxml": satb_xml}, log=log)
+    monkeypatch.setenv("CHOIRSPLIT_OMR_CACHE", str(clean_env / "cache"))
+    pdf = clean_env / "d.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    load_score(pdf)
+    load_score(pdf, omr_dpi=400)
+    load_score(pdf, omr_dpi=400)  # cached separately from the default resolution
+    monkeypatch.setenv("CHOIRSPLIT_OMR_DPI", "400")
+    load_score(pdf)  # the environment variable means the same
+    calls = [json.loads(x)["args"] for x in log.read_text().splitlines()]
+    assert len(calls) == 2
+    assert "-constant" not in calls[0]
+    assert calls[1][calls[1].index("-constant") + 1] == f"{omr.AUDIVERIS_PDF_RESOLUTION}=400"
+    assert omr.cache_key(pdf, omr.find_engine()) != omr.cache_key(pdf, omr.find_engine(), 400)
+
+
+@pytest.mark.parametrize("value", ["abc", "50", "5000"])
+def test_bad_omr_dpi_environment_variable(monkeypatch, value):
+    monkeypatch.setenv("CHOIRSPLIT_OMR_DPI", value)
+    with pytest.raises(ScoreLoadError, match="CHOIRSPLIT_OMR_DPI"):
+        omr.omr_dpi()
 
 
 # --------------------------------------------------------------------------- post-processing

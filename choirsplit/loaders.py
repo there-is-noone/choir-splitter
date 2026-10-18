@@ -21,7 +21,8 @@ def supported_suffixes() -> set[str]:
     return MUSIC21_SUFFIXES | MUSESCORE_SUFFIXES | OMR_SUFFIXES
 
 
-def load_score(path: str | Path) -> stream.Score:
+def load_score(path: str | Path, omr_dpi: int | None = None) -> stream.Score:
+    """Read any supported file. `omr_dpi` is the resolution PDFs are recognised at."""
     path = Path(path)
     if not path.exists():
         raise ScoreLoadError(f"file not found: {path}")
@@ -31,7 +32,7 @@ def load_score(path: str | Path) -> stream.Score:
         return musescore.load(path)
     if suffix in OMR_SUFFIXES:
         from . import omr
-        return omr.load(path)
+        return omr.load(path, dpi=omr_dpi)
     try:
         parsed = converter.parse(str(path))
     except Exception as exc:

@@ -14,6 +14,8 @@ import zipfile
 from fractions import Fraction
 from pathlib import Path
 
+from . import platforms
+
 _DURATION_BASE: dict[str, Fraction] = {
     "long": Fraction(16),
     "breve": Fraction(8),
@@ -184,11 +186,23 @@ def _pick_mscx_entry(zf: zipfile.ZipFile) -> str:
     return candidates[0]
 
 
+def _musescore_install_paths() -> list[Path]:
+    """Where the MuseScore 4 and 3 installers put the program on Windows and macOS."""
+    if platforms.is_windows():
+        return [d / f"MuseScore {v}" / "bin" / f"MuseScore{v}.exe"
+                for v in (4, 3) for d in platforms.program_dirs()]
+    if platforms.is_macos():
+        return [d / f"MuseScore {v}.app" / "Contents" / "MacOS" / "mscore"
+                for v in (4, 3) for d in platforms.program_dirs()]
+    return []
+
+
 def find_musescore_cli() -> list[str] | None:
     """Return the command prefix that runs MuseScore, or None if not found.
 
     Order: CHOIRSPLIT_MUSESCORE env var (file or PATH name), well-known
-    executable names on PATH, then the flatpak MuseScore app.
+    executable names on PATH, the installers' default locations on Windows and
+    macOS, then the flatpak MuseScore app.
     """
     env_value = os.environ.get("CHOIRSPLIT_MUSESCORE", "").strip()
     if env_value:
@@ -202,6 +216,10 @@ def find_musescore_cli() -> list[str] | None:
         found = shutil.which(name)
         if found:
             return [found]
+
+    for exe in _musescore_install_paths():
+        if exe.is_file():
+            return [str(exe)]
 
     if shutil.which("flatpak"):
         try:

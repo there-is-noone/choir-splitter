@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .audio_io import EncoderError, require_ffmpeg
+from .check import format_issues
 from .loaders import ScoreLoadError, supported_suffixes
 from .pipeline import Options, load_tracks, process_tracks
 
@@ -38,10 +39,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="only write tracks for this voice (repeatable)")
     p.add_argument("--title", help="song title used in file names and MP3 tags (default: from the score)")
     p.add_argument("--list", action="store_true", help="list the detected voices and exit")
+    p.add_argument("--check", action="store_true",
+                   help="list bars that look wrong (and what PDF recognition repaired) and exit")
+    p.add_argument("--export-musicxml", type=Path, metavar="FILE",
+                   help="also save the score as MusicXML, e.g. to correct a PDF reading in MuseScore")
+    p.add_argument("--omr-dpi", type=int, metavar="N",
+                   help="resolution to read PDFs at (default: Audiveris's 300)")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream_ in (sys.stdout, sys.stderr):
+        if hasattr(stream_, "reconfigure"):  # e.g. a Windows console or pipe in cp1252
+            stream_.reconfigure(errors="replace")
     args = build_parser().parse_args(argv)
     # Every option goes through one Options object, so the CLI and process_file agree.
     opts = Options(
@@ -49,17 +59,24 @@ def main(argv: list[str] | None = None) -> int:
         bpm=args.bpm, tempo_scale=args.tempo_scale, transpose=args.transpose,
         others_gain=args.others_gain, include_accompaniment=args.include_accompaniment,
         split_voices=args.split_voices, split_chords=args.split_chords, only=args.only,
-        title=args.title,
+        title=args.title, export_musicxml=args.export_musicxml, omr_dpi=args.omr_dpi,
     )
+    listing = args.list or args.check
     try:
+        opts.validate()
+        if args.fmt == "mp3" and not listing:
+            require_ffmpeg()  # fail now, not after a slow PDF recognition
         st = load_tracks(args.score, opts)
+        if args.export_musicxml:
+            print(f"saved {args.export_musicxml}")
         if args.list:
             print(f"{st.title} ({st.duration:.1f}s)")
             for i, t in enumerate(st.tracks, start=1):
                 print(f"  {i:2d}. {t.name} [{t.kind}] {len(t.notes)} notes")
+        if args.check:
+            print_check(st)
+        if listing:
             return 0
-        if args.fmt == "mp3":
-            require_ffmpeg()
         out_dir = args.output or args.score.with_name(args.score.stem + "_tracks")
         written = process_tracks(st, out_dir, opts)
     except (ScoreLoadError, EncoderError, ValueError, OSError) as exc:
@@ -68,7 +85,30 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{st.title}: {len(st.voices)} voices, {st.duration:.1f}s")
     for path in written:
         print(f"  wrote {path}")
+    suspects = {i.bar for i in st.issues if i.kind == "suspect"}
+    if st.recognised and suspects:
+        print(f"choir-split: {len(suspects)} bar{'s' if len(suspects) > 1 else ''} of the recognised score "
+              "may be misread; run again with --check to list them", file=sys.stderr)
     return 0
+
+
+def print_check(st) -> None:
+    issues = sorted(st.issues, key=lambda i: (i.bar if i.bar is not None else -1, i.voice))
+    fixed = [i for i in issues if i.kind == "fixed"]
+    suspects = [i for i in issues if i.kind == "suspect"]
+    if fixed:
+        print(f"Repaired automatically ({len(fixed)}):")
+        for line in format_issues(fixed):
+            print(f"  {line}")
+    if suspects:
+        print(f"Please check ({len(suspects)}):")
+        for line in format_issues(suspects):
+            print(f"  {line}")
+    elif not fixed:
+        print("No problems found.")
+    if suspects and st.recognised:
+        print("To correct them: run with --export-musicxml FILE, fix the bars in MuseScore, "
+              "then run choir-split on the saved file.")
 
 
 if __name__ == "__main__":

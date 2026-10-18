@@ -18,12 +18,22 @@ Any number of voices works: SATB, SSA, TTBB, 5–6 voice madrigals, and
 
 ## Install
 
-Requires Python 3.10+ and `ffmpeg` (with libmp3lame) for MP3 output.
+Works on **Windows, macOS and Linux** with Python 3.10+. MP3 encoding (ffmpeg) is
+installed with the package, so there is nothing else to set up for MusicXML, MuseScore
+or MIDI scores. **Step-by-step instructions for each system, including Audiveris for
+PDFs, are in [INSTALL.md](INSTALL.md).**
+
+Quick version, from inside this folder:
 
 ```bash
-cd choir_splitter
-python3 -m venv .venv
-.venv/bin/pip install -e '.[test]'
+pipx install .                        # the choir-split command then works everywhere
+```
+
+or with a virtual environment:
+
+```bash
+python3 -m venv .venv                 # Windows: py -m venv .venv
+.venv/bin/pip install .               # Windows: .venv\Scripts\python -m pip install .
 ```
 
 ## Usage
@@ -35,6 +45,7 @@ choir-split score.mxl --mode practice      # only the practice mixes (+ full mix
 choir-split score.mxl --tempo-scale 0.8    # 80 % speed for learning
 choir-split score.mxl --only "Tenor 2"     # tracks for one voice
 choir-split scan.pdf --title "Ave Verum"   # name the files and tags yourself
+choir-split scan.pdf --check               # which bars of a PDF reading to check
 ```
 
 | Option | Meaning |
@@ -42,11 +53,11 @@ choir-split scan.pdf --title "Ave Verum"   # name the files and tags yourself
 | `-o DIR` | output directory (default `<score>_tracks`) |
 | `--mode solo\|practice\|both` | which per-voice tracks to write (default `both`) |
 | `--no-full-mix` | skip the all-voices mix |
-| `--format mp3\|wav` | output format (WAV needs no ffmpeg) |
+| `--format mp3\|wav` | output format |
 | `--bitrate 192k` | MP3 bitrate |
 | `--bpm N` | ignore the score's tempo marks and use N quarter notes per minute |
 | `--tempo-scale F` | speed factor applied to the score's tempo |
-| `--transpose N` | shift everything by N semitones |
+| `--transpose N` | shift everything by N semitones (at most 48 either way; notes must stay within MIDI 0–127) |
 | `--others-volume F` | level of the other voices in practice tracks (0–1, default 0.3) |
 | `--no-accompaniment` | leave piano/organ out of the mixes |
 | `--no-split-voices` | keep a staff with several voices (e.g. S+A) as one track |
@@ -54,6 +65,9 @@ choir-split scan.pdf --title "Ave Verum"   # name the files and tags yourself
 | `--only VOICE` | only write tracks for the named voice (repeatable) |
 | `--title TITLE` | song title for the file names and the MP3 album tag (default: the score's title, else its file name) |
 | `--list` | print the detected voices and exit |
+| `--check` | list the bars that look wrong (and, for PDFs, what was repaired) and exit |
+| `--export-musicxml FILE` | also save the score as MusicXML, e.g. to correct a PDF reading in MuseScore |
+| `--omr-dpi N` | resolution to read PDFs at (default: Audiveris's 300) |
 
 ## Input formats
 
@@ -86,10 +100,16 @@ flatpak). Environment variables:
 ### PDF and scanned scores
 
 PDFs and images are read with [Audiveris](https://github.com/Audiveris/audiveris)
-optical music recognition. Install it user-locally (no root, about 210 MB):
+optical music recognition.
+- **Windows:** install the official `windowsConsole` `.msi`.
+- **macOS:** install the `.dmg`.
+
+choirsplit finds both in their default folders (see [INSTALL.md](INSTALL.md)).
+
+On Linux, install it user-locally (no root, about 210 MB):
 
 ```bash
-scripts/install_omr.sh        # needs curl, ar, tar (zstd), sha256sum, python3
+scripts/install_omr.sh        # Linux x86-64; needs curl, ar, tar (zstd), sha256sum, python3
 ```
 
 This puts Audiveris under `~/.local/share/choirsplit/audiveris/` and English
@@ -101,9 +121,57 @@ cached, so a second run is instant.
 choirsplit cleans up the recognised score: parts are matched across systems
 by staff position, bars are aligned, two-voice hymn staves are split into
 upper and lower lines, unnamed staves are named by layout (SATB, SSAATTBB, …),
-and tenor parts written in a plain treble clef are moved down an octave. OMR
-is never perfect: check the result with `--list` and, for important scores,
-prefer MusicXML or MuseScore files.
+and tenor parts written in a plain treble clef are moved down an octave.
+Misreadings are repaired where the printed page leaves no doubt. Notes struck
+together are printed at the same horizontal position on every staff of a system,
+so when one voice's bar comes up short:
+- augmentation dots OMR missed are restored;
+- notes pulled early by a missed rest are moved back to where they are printed.
+
+Stray notes are dropped when OMR took them from the piano into a voice:
+- a note next to a voice's whole-bar rest (often a piano note head or tie just outside the staff);
+- a note far outside the voice's range, on the piano side of the staff.
+
+Pitches are never changed.
+
+### When recognition isn't perfect
+
+OMR is never perfect. `--check` lists what was repaired and which bars still look
+wrong, with the page and system to find them in the PDF:
+
+```
+$ choir-split lullaby.pdf --check
+Repaired automatically (4):
+  all bars         Tenor  fixed: sung an octave lower (treble clef read without its small 8)
+  bar 2 (p1, s1)   Bass   fixed: dropped stray notes beside a whole-bar rest
+  bar 31 (p2, s2)  Alto   fixed: moved 1 note to where they are printed (missed rest or note length)
+  bar 93 (p6, s2)  Alto   fixed: restored 1 missed dot
+Please check (7):
+  bar 32 (p2, s2)  Alto   suspect: notes fill 2 of 3 beats (missed dot or rest?)
+  bar 32 (p2, s2)  Bass   suspect: notes fill 2 of 3 beats (missed dot or rest?)
+  ...
+```
+
+Bars are flagged when:
+- **Short:** a voice's notes run out before the end of the bar.
+- **Out of range:** a note is far outside the voice's range.
+- **Big leap:** a jump is much larger than the voice makes anywhere else.
+- **Out of step:** the voice's rhythm breaks away from the others in a passage where they all move together.
+
+A normal run prints a one-line reminder when the recognised score has such bars.
+
+To fix them for good, save the cleaned score, correct it in MuseScore (free), and make
+the tracks from the corrected file. That file loads without OMR from then on:
+
+```bash
+choir-split lullaby.pdf --export-musicxml lullaby.musicxml --list
+# open lullaby.musicxml in MuseScore, fix the bars --check listed, save
+choir-split lullaby.musicxml
+```
+
+If a scan reads badly, try another resolution with `--omr-dpi`. Audiveris renders PDFs at
+300 dpi by default. Higher is not automatically better: on our test scores, 400 dpi
+read worse than 300. Results for each resolution are cached separately.
 
 | Variable | Meaning |
 | --- | --- |
@@ -111,6 +179,7 @@ prefer MusicXML or MuseScore files.
 | `CHOIRSPLIT_OMR_CMD` | use another OMR engine: a command with `{input}` (or `{image}`, run per page) and `{outdir}` that writes MusicXML |
 | `CHOIRSPLIT_OMR_TIMEOUT` | seconds before recognition is stopped (default 120 + 120 per page) |
 | `CHOIRSPLIT_OMR_CACHE` | cache directory, or `0` to disable the cache |
+| `CHOIRSPLIT_OMR_DPI` | resolution PDFs are read at, like `--omr-dpi` |
 
 ### How voices are found
 
@@ -135,13 +204,16 @@ external synthesiser is needed.
 ## Development
 
 ```bash
+.venv/bin/pip install -e ".[test]"             # Windows: .venv\Scripts\python -m pip install -e ".[test]"
 .venv/bin/python -m pytest -q                  # full suite (OMR tests need Audiveris)
 .venv/bin/python -m pytest -q -m "not slow"     # quick run
 .venv/bin/python -m pytest -q -m slow            # slow tests only, incl. the Bach chorale sweep
 ```
 
 Tests needing Audiveris (`omr`) or the MuseScore program (`musescore`) are
-skipped when those aren't installed. Fixture sources and licences are listed
+skipped when those aren't installed. The suite runs on Linux, macOS and Windows in
+GitHub Actions (`.github/workflows/choirsplit.yml`); a few tests that fake programs
+with shell scripts are skipped on Windows. Fixture sources and licences are listed
 in `tests/fixtures/*/SOURCES.md`.
 
 Code layout (`choirsplit/`):
@@ -153,4 +225,6 @@ Code layout (`choirsplit/`):
 - `audio_io.py`: WAV / MP3 output
 - `musescore.py`, `mscx_utils.py`: MuseScore file reader
 - `omr.py`: PDF/image recognition with Audiveris and clean-up of its output
+- `check.py`: bars that look misread (`--check`)
 - `pipeline.py`, `cli.py`: glue and command line
+- `platforms.py`: per-OS data/cache folders and where installers put Audiveris and MuseScore

@@ -85,6 +85,8 @@ class ScoreTracks:
     title: str
     tracks: list[Track]
     duration: float  # seconds; every rendered track is padded to this length
+    issues: list = field(default_factory=list)  # check.Issue: OMR repairs and suspect bars
+    recognised: bool = False  # read from a PDF/image by optical music recognition
 
     @property
     def voices(self) -> list[Track]:
