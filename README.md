@@ -134,6 +134,13 @@ Notes that aren't sung are dropped:
 
 Pitches are never changed.
 
+Sometimes Audiveris misses a note entirely, leaving a staff's bar empty while the other
+voices sing. A whole note on a ledger line under a fermata is a typical case. When that
+happens, choirsplit reads the PDF a second time at 250 dpi and fills the empty bars from
+that reading, but only where the other voices of the bar are identical in both readings.
+This takes one more recognition run (about 20 s per page), only for scores that need
+it, and it is cached like the first.
+
 ### When recognition isn't perfect
 
 OMR is never perfect. `--check` lists what was repaired and which bars still look
@@ -153,6 +160,7 @@ Please check (7):
 ```
 
 Bars are flagged when:
+- **Empty:** nothing was recognised on a staff while the other voices sing (even after the second reading).
 - **Short:** a voice's notes run out before the end of the bar.
 - **Out of range:** a note is far outside the voice's range.
 - **Big leap:** a jump is much larger than the voice makes anywhere else.
