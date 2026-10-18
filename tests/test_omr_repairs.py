@@ -142,11 +142,25 @@ def test_stray_note_next_to_a_whole_bar_rest_is_dropped(tmp_path):
     assert len(st.accompaniment[0].notes) == 6 + 3 + 1 + 3 + 1 + 1
 
 
-def test_notes_beside_a_whole_bar_rest_are_kept_while_the_staff_sings(tmp_path):
-    """Conservative: if the staff sings in the neighbouring bars, the note stays."""
-    bass = [["C3:12.@20"], ["R", "F2:12.@14"], ["G2:12.@20"]]
+def test_cue_notes_beside_a_whole_bar_rest_are_dropped_while_the_staff_sings(tmp_path):
+    """The Lord of the Rings suite, pages 5 and 7: the resting bass staff prints the
+    cello's part in small cue notes ("Vc.") under its whole-bar rests, between bars the
+    bass sings. Nothing the choir sings lines up with them: the bar stays silent."""
+    bass = [["C3:12.@20"], ["R", "F2:4@37 C3:4@71 F3:4@103"], ["G2:12.@20"]]
     merged = assemble_xml(tmp_path, audiveris_xml(satb_piano(bass), beats=3))
-    assert [n[0] for bar in rhythm(by_name(merged)["Bass"]) for n in bar] == ["C3", "F2", "G2"]
+    assert [n[0] for bar in rhythm(by_name(merged)["Bass"]) for n in bar] == ["C3", "G2"]
+    assert [(i.bar, i.voice, i.detail.split(" (")[0]) for i in merged.omr_issues] == [
+        (2, "Bass", "dropped notes beside a whole-bar rest")]
+
+
+def test_divisi_voice_singing_with_the_choir_beside_a_bar_rest_is_kept(tmp_path):
+    """Tenor 1 sings while tenor 2 (same staff) shows a whole-bar rest: its notes start
+    where the bass's do, so they are sung, not cue notes."""
+    tenor = [["C4:12.@20"], ["R", "D4:4@20 E4:4@60 F4:4@100"], ["C4:12.@20"]]
+    bass = [["C3:12.@20"], ["B2:4@20 C3:4@60 D3:4@100"], ["C3:12.@20"]]
+    merged = assemble_xml(tmp_path, audiveris_xml(satb_piano(bass, tenor_bars=tenor), beats=3))
+    sung = [n[0] for bar in rhythm(by_name(merged)["Tenor"]) for n in bar]
+    assert len(sung) == 5 and sung[0] == sung[-1]
 
 
 def test_two_voice_staff_with_a_resting_voice_keeps_its_notes(tmp_path):
@@ -311,6 +325,62 @@ def test_stray_note_and_tenor_octave_are_logged(tmp_path):
         (None, "Tenor", "sung an octave lower"),
         (2, "Bass", "dropped stray notes beside a whole-bar rest"),
     ]
+
+
+# --------------------------------------------------------------------------- missed notes
+
+
+def welt(tenor=None, bass=None, soprano="E5:16@34"):
+    """Mendelssohn, Psalm 100, bar 3 ("Welt!"): a whole note in every voice. `None` is a
+    staff where OMR recognised nothing (an empty <measure>)."""
+    return audiveris_xml([
+        {"name": "Soprano", "clef": "G", "bars": [[soprano]]},
+        {"name": "Alto", "clef": "G", "bars": [["C5:16@34"]]},
+        {"name": "Tenor", "clef": "G", "bars": [[tenor]]},
+        {"name": "Bass", "clef": "F", "bars": [[bass]]},
+    ])
+
+
+def parse_xml(tmp_path, xml, name):
+    path = tmp_path / f"{name}.musicxml"
+    path.write_text(xml, encoding="utf-8")
+    return omr.parse_outputs([path])
+
+
+def test_bars_with_nothing_recognised_are_reported(tmp_path):
+    merged = assemble_xml(tmp_path, welt())
+    assert [(i.bar, i.voice, i.kind, i.detail.split(" (")[0]) for i in merged.omr_issues] == [
+        (1, "Tenor", "suspect", "nothing recognised in this bar"),
+        (1, "Bass", "suspect", "nothing recognised in this bar"),
+    ]
+
+
+def test_a_bar_where_everybody_rests_is_not_reported(tmp_path):
+    """Nobody sings in the bar (one staff's rest recognised, the others' not): nothing to
+    compare with, so nothing is claimed missing."""
+    xml = audiveris_xml([{"name": n, "clef": "G", "bars": [[spec]]}
+                         for n, spec in (("Soprano", None), ("Alto", "R"), ("Tenor", None), ("Bass", None))])
+    assert assemble_xml(tmp_path, xml).omr_issues == []
+
+
+def test_missed_notes_are_filled_from_a_second_reading(tmp_path):
+    first = parse_xml(tmp_path, welt(), "first")
+    second = parse_xml(tmp_path, welt(tenor="G4:16@34", bass="C4:16@34"), "second")
+    assert omr.fill_from_second_reading(first, second, 250) == 2
+    merged = omr.assemble(first)
+    parts = by_name(merged)
+    assert rhythm(parts["Bass"]) == [[("C4", 0.0, 4.0)]]
+    assert [n[0][0] for n in rhythm(parts["Tenor"])] == ["G3"]  # (a treble-clef tenor, sung lower)
+    filled = [(i.bar, i.voice) for i in merged.omr_issues if "second reading at 250 dpi" in i.detail]
+    assert filled == [(1, "Tenor"), (1, "Bass")]
+
+
+def test_second_reading_is_not_used_where_the_readings_disagree(tmp_path):
+    """The other voices of the bar differ, so the readings may not be the same bar."""
+    first = parse_xml(tmp_path, welt(), "first")
+    second = parse_xml(tmp_path, welt(tenor="G4:16@34", bass="C4:16@34", soprano="F5:16@34"), "second")
+    assert omr.fill_from_second_reading(first, second, 250) == 0
+    assert not list(by_name(omr.assemble(first))["Bass"].recurse().notes)
 
 
 def test_grand_staff_stays_one_part_when_saved(tmp_path):

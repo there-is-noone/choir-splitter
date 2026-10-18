@@ -128,11 +128,18 @@ so when one voice's bar comes up short:
 - augmentation dots OMR missed are restored;
 - notes pulled early by a missed rest are moved back to where they are printed.
 
-Stray notes are dropped when OMR took them from the piano into a voice:
-- a note next to a voice's whole-bar rest (often a piano note head or tie just outside the staff);
-- a note far outside the voice's range, on the piano side of the staff.
+Notes that aren't sung are dropped:
+- notes in a bar that shows a whole-bar rest, if they line up with nothing the other voices sing. These are small cue notes of an instrument printed in a resting staff ("Vn. II", "Vc."), or bar lines and courtesy time signatures misread as notes. A divisi voice that sings while the other voice of its staff rests is kept.
+- a note OMR took from the piano into a voice: next to a whole-bar rest, or far outside the voice's range on the piano side of the staff.
 
 Pitches are never changed.
+
+Sometimes Audiveris misses a note entirely, leaving a staff's bar empty while the other
+voices sing. A whole note on a ledger line under a fermata is a typical case. When that
+happens, choirsplit reads the PDF a second time at 250 dpi and fills the empty bars from
+that reading, but only where the other voices of the bar are identical in both readings.
+This takes one more recognition run (about 20 s per page), only for scores that need
+it, and it is cached like the first.
 
 ### When recognition isn't perfect
 
@@ -153,6 +160,7 @@ Please check (7):
 ```
 
 Bars are flagged when:
+- **Empty:** nothing was recognised on a staff while the other voices sing (even after the second reading).
 - **Short:** a voice's notes run out before the end of the bar.
 - **Out of range:** a note is far outside the voice's range.
 - **Big leap:** a jump is much larger than the voice makes anywhere else.

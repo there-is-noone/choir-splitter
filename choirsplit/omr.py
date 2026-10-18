@@ -82,6 +82,9 @@ POLYPHONY_THRESHOLD = 0.15  # fraction of sounding time where two voices overlap
 CACHE_VERSION = "1"  # bump when the raw engine invocation changes
 # Audiveris setting for the resolution PDF pages are rendered at (its default is 300 dpi).
 AUDIVERIS_PDF_RESOLUTION = "org.audiveris.omr.image.ImageLoading.pdfResolution"
+# A second reading at this resolution often sees note heads the default one misses
+# (Mendelssohn's Psalm 100: 5 empty sung bars at 250 dpi against 14 at 300 and 26 at 400).
+SECOND_READING_DPI = 250
 _EPS = 1e-6
 
 
@@ -418,10 +421,30 @@ def load(path: Path, dpi: int | None = None) -> stream.Score:
     engine = find_engine()
     if engine is None:
         raise _error(f"cannot read {path.name}: " + install_hint())
-    scores = recognise(path, engine, omr_dpi(dpi))
+    dpi = omr_dpi(dpi)
+    scores = recognise(path, engine, dpi)
     if not scores:
         raise _error(f"OMR found no music in {path.name}")
+    if dpi is None and engine.name == "audiveris" and path.suffix.lower() == ".pdf":
+        missed = sum(len(unrecognised_bars(seg)) for s in scores for seg in segments_of(s))
+        if missed:
+            second_reading(path, engine, scores, missed)
     return assemble(scores, title_hint=path.stem)
+
+
+def second_reading(path: Path, engine: Engine, scores: list[stream.Score], missed: int) -> int:
+    """Read the PDF again at SECOND_READING_DPI and fill the `missed` empty sung bars of
+    `scores` from it where the readings agree. Returns the bars filled."""
+    from .loaders import ScoreLoadError
+
+    print(f"choirsplit: {missed} sung bar{'s' if missed > 1 else ''} not recognised; reading "
+          f"{path.name} again at {SECOND_READING_DPI} dpi", file=sys.stderr)
+    try:
+        second = recognise(path, engine, SECOND_READING_DPI)
+    except ScoreLoadError as exc:
+        print(f"choirsplit: second reading failed: {exc}", file=sys.stderr)
+        return 0
+    return fill_from_second_reading(scores, second, SECOND_READING_DPI)
 
 
 # --------------------------------------------------------------------------- post-processing
@@ -802,6 +825,126 @@ def repair_onsets(seg: Segment, lengths: list[float], report: Report | None = No
     return repaired
 
 
+def _bar_rest(m: stream.Measure) -> bool:
+    """The measure shows a whole-bar rest (MusicXML ``<rest measure="yes">``)."""
+    return any(getattr(r, "fullMeasure", False) is True for r in m.recurse().getElementsByClass(note.Rest))
+
+
+def _sung_units(seg: Segment) -> set[int]:
+    """Indices of the sung staff groups of a segment (all of them in a closed score)."""
+    acc = [is_accompaniment(unit.staves[0]) for unit in seg.units]
+    return {u for u, a in enumerate(acc) if not a} or set(range(len(seg.units)))
+
+
+def _nothing_recognised(m: stream.Measure) -> bool:
+    """OMR left the bar empty: music21 filled it with its own bar rest ("auto", without
+    a position). A printed bar always shows a note or a rest, so something was missed."""
+    return all(e.isRest and getattr(e, "fullMeasure", None) == "auto" and _x(e) is None
+               for e in m.recurse().notesAndRests)
+
+
+def unrecognised_bars(seg: Segment) -> list[tuple[int, int, int]]:
+    """(measure index, unit index, staff index) of the sung staff bars of a segment where
+    nothing was recognised although another sung staff has notes in the bar."""
+    sung = _sung_units(seg)
+    out = []
+    for i in seg.measure_range:
+        located = [(u, s, m) for u, s, m in _bar_measures(seg, i) if u in sung]
+        for u, s, m in located:
+            if _nothing_recognised(m) and any(_has_notes(m2) for _, _, m2 in located if m2 is not m):
+                out.append((i, u, s))
+    return out
+
+
+def _notes_signature(m: stream.Measure) -> list[tuple[float, tuple[float, ...]]]:
+    return sorted((round(off, 4), tuple(sorted(p.ps for p in el.pitches))) for _, off, el in _note_elements(m))
+
+
+def fill_from_second_reading(first: list[stream.Score], second: list[stream.Score], dpi: int) -> int:
+    """Fill the staff bars the first reading left empty (`unrecognised_bars`) with the same
+    bar of a second reading of the page at another resolution, which often sees note
+    heads the first one missed (whole notes on ledger lines under a fermata, ...).
+
+    A bar is only taken when the two readings demonstrably line up there: the same
+    systems, measures and staves, the same clef on that staff, and every other sung staff
+    of the bar holding the same notes in both. Filled measures are marked with
+    ``choirsplit_filled = dpi`` so `assemble` can log them. Returns the bars filled."""
+    if len(first) != len(second):
+        return 0
+    filled = 0
+    for s1, s2 in zip(first, second):
+        segs1, segs2 = segments_of(s1), segments_of(s2)
+        if len(segs1) != len(segs2):
+            continue
+        for seg1, seg2 in zip(segs1, segs2):
+            if (seg1.measure_range != seg2.measure_range
+                    or [len(u.staves) for u in seg1.units] != [len(u.staves) for u in seg2.units]):
+                continue
+            sung = _sung_units(seg1)
+            for i, u, s in unrecognised_bars(seg1):
+                ones = {(uu, ss): m for uu, ss, m in _bar_measures(seg1, i)}
+                twos = {(uu, ss): m for uu, ss, m in _bar_measures(seg2, i)}
+                m1, m2 = ones.get((u, s)), twos.get((u, s))
+                if m1 is None or m2 is None or not _has_notes(m2):
+                    continue
+                if _clef_sign(seg1.units[u].staves[s], m1) != _clef_sign(seg2.units[u].staves[s], m2):
+                    continue
+                checked = [(key, mm) for key, mm in ones.items()
+                           if key[0] in sung and key != (u, s) and _has_notes(mm)]
+                if not checked or any(key not in twos or _notes_signature(mm) != _notes_signature(twos[key])
+                                      for key, mm in checked):
+                    continue
+                for el in list(m1.notesAndRests) + list(m1.voices):
+                    m1.remove(el)
+                for el in list(m2.voices) + list(m2.notesAndRests):
+                    m1.insert(float(el.offset), copy.deepcopy(el))
+                m1.choirsplit_filled = dpi
+                filled += 1
+    return filled
+
+
+def drop_unaligned_beside_bar_rests(seg: Segment, report: Report | None = None) -> int:
+    """Drop notes that share a bar with a whole-bar rest and line up with nothing the
+    other voices sing.
+
+    A whole-bar rest says the staff is silent. Audiveris still reads things next to it
+    as notes: small cue notes of another instrument printed in the resting staff
+    ("Vc." passages), and marks at the bar's edges such as the bar line or a courtesy
+    time signature. None of those line up with a note of another sung staff. A divisi
+    voice that really sings while the other voice of its staff rests does, so on a
+    single-line staff the notes of such a bar are dropped only when *none* of them
+    starts where a note of another sung staff (without a bar rest) starts.
+    Returns the number of staff bars cleaned.
+    """
+    sung = _sung_units(seg)
+    polyphonic: dict[int, bool] = {}
+    cleaned = 0
+    for i in seg.measure_range:
+        located = [(u, s, m) for u, s, m in _bar_measures(seg, i) if u in sung]
+        resting = [(u, s, m) for u, s, m in located if _bar_rest(m) and _has_notes(m)]
+        if not resting:
+            continue
+        ref = [x for _, _, m in located if not _bar_rest(m)
+               for _, _, el in _note_elements(m) for x in [_x(el)] if x is not None]
+        for u, s, m in resting:
+            staff = seg.units[u].staves[s]
+            if id(staff) not in polyphonic:  # a real two-voice staff keeps everything
+                others = [mm for mm in _measures(staff) if not (_bar_rest(mm) and _has_notes(mm))]
+                polyphonic[id(staff)] = _polyphony(others) >= POLYPHONY_THRESHOLD
+            if polyphonic[id(staff)]:
+                continue
+            notes = [el for _, _, el in _note_elements(m)]
+            xs = [_x(el) for el in notes]
+            if any(x is None for x in xs) or any(abs(x - r) <= DOT_X_TOLERANCE for x in xs for r in ref):
+                continue
+            for el in notes:
+                el.activeSite.remove(el)
+            cleaned += 1
+            if report is not None:
+                report(i, u, s, "dropped notes beside a whole-bar rest (cue notes or stray marks)")
+    return cleaned
+
+
 def _bar_measures(seg: Segment, i: int) -> list[tuple[int, int, stream.Measure]]:
     """(unit index, staff index, measure) of measure `i` on every staff of a segment."""
     return [(u, s, ms[i]) for u, unit in enumerate(seg.units) for s, p in enumerate(unit.staves)
@@ -901,8 +1044,11 @@ def assemble(scores: list[stream.Score], title_hint: str | None = None) -> strea
         def report(i, u, s, detail, kind="fixed", mapping=mapping, first=first):
             log.append((first + i, mapping[u], s, kind, detail))
 
+        drop_unaligned_beside_bar_rests(seg, report)
         repair_missing_dots(seg, lengths, report)
         repair_onsets(seg, lengths, report)
+        for i, u, s in unrecognised_bars(seg):
+            report(i, u, s, "nothing recognised in this bar (missed note?)", "suspect")
         slot_unit = {k: u for u, k in zip(seg.units, mapping)}
         for i, length in zip(seg.measure_range, lengths):
             number += 1
@@ -913,6 +1059,9 @@ def assemble(scores: list[stream.Score], title_hint: str | None = None) -> strea
                     src = u.staves[s] if u is not None and s < len(u.staves) else None
                     src_ms = _measures(src) if src is not None else []
                     if src is not None and i < len(src_ms):
+                        filled = getattr(src_ms[i], "choirsplit_filled", None)
+                        if filled:
+                            log.append((number, k, s, "fixed", f"filled from a second reading at {filled} dpi"))
                         m = copy.deepcopy(src_ms[i])
                         if previous_source[k][s] != id(src):
                             _carry_context(src, src_ms[i], m)

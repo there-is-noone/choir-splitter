@@ -384,6 +384,52 @@ def test_omr_dpi_reaches_audiveris_and_the_cache_key(clean_env, monkeypatch, sat
     assert omr.cache_key(pdf, omr.find_engine()) != omr.cache_key(pdf, omr.find_engine(), 400)
 
 
+def fake_two_readings(clean_env, first_xml: str, second_xml: str) -> Path:
+    """A fake Audiveris whose reading at another resolution (-constant ...) differs."""
+    first, second = clean_env / "first.musicxml", clean_env / "second.musicxml"
+    first.write_text(first_xml, encoding="utf-8")
+    second.write_text(second_xml, encoding="utf-8")
+    log = clean_env / "calls.jsonl"
+    make_exe(clean_env / "empty-bin" / "Audiveris", f"""
+        import json, os, shutil, sys
+        args = sys.argv[1:]
+        with open({str(log)!r}, "a") as fh:
+            fh.write(json.dumps(args) + "\\n")
+        out = args[args.index("-output") + 1]
+        src = {str(second)!r} if "-constant" in args else {str(first)!r}
+        shutil.copy(src, os.path.join(out, "score.musicxml"))
+    """)
+    return log
+
+
+def test_missed_notes_trigger_a_second_reading(clean_env, capsys):
+    from test_omr_repairs import welt
+
+    log = fake_two_readings(clean_env, welt(), welt(tenor="G4:16@34", bass="C4:16@34"))
+    pdf = clean_env / "welt.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    score = load_score(pdf)
+    calls = [json.loads(x) for x in log.read_text().splitlines()]
+    assert len(calls) == 2
+    assert f"{omr.AUDIVERIS_PDF_RESOLUTION}={omr.SECOND_READING_DPI}" in calls[1]
+    assert "reading welt.pdf again at 250 dpi" in capsys.readouterr().err
+    bass = next(p for p in score.parts if p.partName == "Bass")
+    assert [n.nameWithOctave for n in bass.recurse().notes] == ["C4"]
+    # An explicit resolution means "read it like this": no second reading.
+    load_score(pdf, omr_dpi=300)
+    assert len(log.read_text().splitlines()) == 3
+
+
+def test_no_second_reading_when_nothing_is_missed(clean_env):
+    from test_omr_repairs import welt
+
+    log = fake_two_readings(clean_env, welt(tenor="G4:16@34", bass="C4:16@34"), welt())
+    pdf = clean_env / "full.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    load_score(pdf)
+    assert len(log.read_text().splitlines()) == 1
+
+
 @pytest.mark.parametrize("value", ["abc", "50", "5000"])
 def test_bad_omr_dpi_environment_variable(monkeypatch, value):
     monkeypatch.setenv("CHOIRSPLIT_OMR_DPI", value)
