@@ -142,11 +142,25 @@ def test_stray_note_next_to_a_whole_bar_rest_is_dropped(tmp_path):
     assert len(st.accompaniment[0].notes) == 6 + 3 + 1 + 3 + 1 + 1
 
 
-def test_notes_beside_a_whole_bar_rest_are_kept_while_the_staff_sings(tmp_path):
-    """Conservative: if the staff sings in the neighbouring bars, the note stays."""
-    bass = [["C3:12.@20"], ["R", "F2:12.@14"], ["G2:12.@20"]]
+def test_cue_notes_beside_a_whole_bar_rest_are_dropped_while_the_staff_sings(tmp_path):
+    """The Lord of the Rings suite, pages 5 and 7: the resting bass staff prints the
+    cello's part in small cue notes ("Vc.") under its whole-bar rests, between bars the
+    bass sings. Nothing the choir sings lines up with them: the bar stays silent."""
+    bass = [["C3:12.@20"], ["R", "F2:4@37 C3:4@71 F3:4@103"], ["G2:12.@20"]]
     merged = assemble_xml(tmp_path, audiveris_xml(satb_piano(bass), beats=3))
-    assert [n[0] for bar in rhythm(by_name(merged)["Bass"]) for n in bar] == ["C3", "F2", "G2"]
+    assert [n[0] for bar in rhythm(by_name(merged)["Bass"]) for n in bar] == ["C3", "G2"]
+    assert [(i.bar, i.voice, i.detail.split(" (")[0]) for i in merged.omr_issues] == [
+        (2, "Bass", "dropped notes beside a whole-bar rest")]
+
+
+def test_divisi_voice_singing_with_the_choir_beside_a_bar_rest_is_kept(tmp_path):
+    """Tenor 1 sings while tenor 2 (same staff) shows a whole-bar rest: its notes start
+    where the bass's do, so they are sung, not cue notes."""
+    tenor = [["C4:12.@20"], ["R", "D4:4@20 E4:4@60 F4:4@100"], ["C4:12.@20"]]
+    bass = [["C3:12.@20"], ["B2:4@20 C3:4@60 D3:4@100"], ["C3:12.@20"]]
+    merged = assemble_xml(tmp_path, audiveris_xml(satb_piano(bass, tenor_bars=tenor), beats=3))
+    sung = [n[0] for bar in rhythm(by_name(merged)["Tenor"]) for n in bar]
+    assert len(sung) == 5 and sung[0] == sung[-1]
 
 
 def test_two_voice_staff_with_a_resting_voice_keeps_its_notes(tmp_path):

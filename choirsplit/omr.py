@@ -802,6 +802,54 @@ def repair_onsets(seg: Segment, lengths: list[float], report: Report | None = No
     return repaired
 
 
+def _bar_rest(m: stream.Measure) -> bool:
+    """The measure shows a whole-bar rest (MusicXML ``<rest measure="yes">``)."""
+    return any(getattr(r, "fullMeasure", False) is True for r in m.recurse().getElementsByClass(note.Rest))
+
+
+def drop_unaligned_beside_bar_rests(seg: Segment, report: Report | None = None) -> int:
+    """Drop notes that share a bar with a whole-bar rest and line up with nothing the
+    other voices sing.
+
+    A whole-bar rest says the staff is silent. Audiveris still reads things next to it
+    as notes: small cue notes of another instrument printed in the resting staff
+    ("Vc." passages), and marks at the bar's edges such as the bar line or a courtesy
+    time signature. None of those line up with a note of another sung staff. A divisi
+    voice that really sings while the other voice of its staff rests does, so on a
+    single-line staff the notes of such a bar are dropped only when *none* of them
+    starts where a note of another sung staff (without a bar rest) starts.
+    Returns the number of staff bars cleaned.
+    """
+    acc = [is_accompaniment(unit.staves[0]) for unit in seg.units]
+    sung = {u for u, a in enumerate(acc) if not a} or set(range(len(seg.units)))
+    polyphonic: dict[int, bool] = {}
+    cleaned = 0
+    for i in seg.measure_range:
+        located = [(u, s, m) for u, s, m in _bar_measures(seg, i) if u in sung]
+        resting = [(u, s, m) for u, s, m in located if _bar_rest(m) and _has_notes(m)]
+        if not resting:
+            continue
+        ref = [x for _, _, m in located if not _bar_rest(m)
+               for _, _, el in _note_elements(m) for x in [_x(el)] if x is not None]
+        for u, s, m in resting:
+            staff = seg.units[u].staves[s]
+            if id(staff) not in polyphonic:  # a real two-voice staff keeps everything
+                others = [mm for mm in _measures(staff) if not (_bar_rest(mm) and _has_notes(mm))]
+                polyphonic[id(staff)] = _polyphony(others) >= POLYPHONY_THRESHOLD
+            if polyphonic[id(staff)]:
+                continue
+            notes = [el for _, _, el in _note_elements(m)]
+            xs = [_x(el) for el in notes]
+            if any(x is None for x in xs) or any(abs(x - r) <= DOT_X_TOLERANCE for x in xs for r in ref):
+                continue
+            for el in notes:
+                el.activeSite.remove(el)
+            cleaned += 1
+            if report is not None:
+                report(i, u, s, "dropped notes beside a whole-bar rest (cue notes or stray marks)")
+    return cleaned
+
+
 def _bar_measures(seg: Segment, i: int) -> list[tuple[int, int, stream.Measure]]:
     """(unit index, staff index, measure) of measure `i` on every staff of a segment."""
     return [(u, s, ms[i]) for u, unit in enumerate(seg.units) for s, p in enumerate(unit.staves)
@@ -901,6 +949,7 @@ def assemble(scores: list[stream.Score], title_hint: str | None = None) -> strea
         def report(i, u, s, detail, kind="fixed", mapping=mapping, first=first):
             log.append((first + i, mapping[u], s, kind, detail))
 
+        drop_unaligned_beside_bar_rests(seg, report)
         repair_missing_dots(seg, lengths, report)
         repair_onsets(seg, lengths, report)
         slot_unit = {k: u for u, k in zip(seg.units, mapping)}

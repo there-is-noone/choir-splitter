@@ -128,9 +128,9 @@ so when one voice's bar comes up short:
 - augmentation dots OMR missed are restored;
 - notes pulled early by a missed rest are moved back to where they are printed.
 
-Stray notes are dropped when OMR took them from the piano into a voice:
-- a note next to a voice's whole-bar rest (often a piano note head or tie just outside the staff);
-- a note far outside the voice's range, on the piano side of the staff.
+Notes that aren't sung are dropped:
+- notes in a bar that shows a whole-bar rest, if they line up with nothing the other voices sing. These are small cue notes of an instrument printed in a resting staff ("Vn. II", "Vc."), or bar lines and courtesy time signatures misread as notes. A divisi voice that sings while the other voice of its staff rests is kept.
+- a note OMR took from the piano into a voice: next to a whole-bar rest, or far outside the voice's range on the piano side of the staff.
 
 Pitches are never changed.
 
