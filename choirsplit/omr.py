@@ -56,7 +56,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from music21 import clef, converter, instrument, layout, meter, note, stream, text
+from music21 import clef, converter, instrument, layout, meter, note, stream, text, tie
 
 from . import platforms
 from .check import Issue, voice_range
@@ -980,6 +980,27 @@ def _remove_heads(m: stream.Measure, heads: list) -> None:
     m.coreElementsChanged()
 
 
+def _tie_slurred_repeats(prev: stream.Measure, m: stream.Measure) -> None:
+    """Make a tie of an arc from the last note of `prev` to the same pitch at the start of
+    `m`. OMR took it for a slur because the note it saw next was the misread time
+    signature, which has another pitch."""
+    before = list(prev.recurse().notes)
+    if not before:
+        return
+    last = max(float(n.getOffsetInHierarchy(prev)) for n in before)
+    for n in m.recurse().getElementsByClass(note.Note):
+        if float(n.getOffsetInHierarchy(m)) > _EPS:
+            continue
+        for slur in n.getSpannerSites("Slur"):
+            start = slur.getFirst()
+            if (start is not n and isinstance(start, note.Note) and start.pitch == n.pitch
+                    and any(start is b for b in before)
+                    and abs(float(start.getOffsetInHierarchy(prev)) - last) < _EPS):
+                held = start.tie is not None and start.tie.type in ("stop", "continue")
+                start.tie = tie.Tie("continue" if held else "start")
+                n.tie = tie.Tie("stop")
+
+
 def drop_misread_time_signatures(seg: Segment, report: Report | None = None) -> dict[int, float | None]:
     """Remove time signatures OMR read as notes, and tell the meter they printed.
 
@@ -1003,6 +1024,8 @@ def drop_misread_time_signatures(seg: Segment, report: Report | None = None) -> 
             _remove_heads(m, heads)
             if report is not None:
                 report(i, u, s, "removed a time signature misread as a note")
+        for u, s, m in located:
+            _tie_slurred_repeats(_measures(seg.units[u].staves[s])[i - 1], m)
         sung = Counter(round(_content_length(m), 4) for _, _, m in located
                        if _has_notes(m) and not _bar_rest(m))
         length, votes = sung.most_common(1)[0] if sung else (0.0, 0)

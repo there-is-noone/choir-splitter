@@ -327,6 +327,22 @@ def test_time_signature_misread_as_notes_is_removed_and_its_meter_kept(tmp_path)
     assert [n.pitch for n in voices["Soprano"].notes] == [65, 67, 69, 72]
 
 
+def test_arc_over_a_misread_time_signature_becomes_a_tie(tmp_path):
+    """The alto holds its F over the 3/4 bar line. OMR saw the misread time signature as
+    the next note and so took the arc for a slur; without it, the F is held, not
+    sung again."""
+    parts = missed_three_four()
+    parts[2]["bars"][0] = ["D4:8@36 F4:12.@150"]
+    held, again = _note("F4:12.@150"), _note("F4:12.@36")
+    xml = audiveris_xml(parts, beats=5, times={3: (2, 4)})
+    for el, kind in ((held, "start"), (again, "stop")):
+        assert xml.count(el) == 1
+        xml = xml.replace(el, el.replace("</note>", f'<notations><slur type="{kind}" number="1"/></notations></note>'))
+    alto = next(t for t in extract_tracks(assemble_xml(tmp_path, xml)).voices if t.name == "Alto")
+    assert [n.pitch for n in alto.notes] == [62, 65, 69]
+    assert alto.notes[1].duration == pytest.approx(3 * alto.notes[0].duration)
+
+
 def test_a_note_at_the_bar_line_on_one_staff_is_not_a_time_signature(tmp_path):
     """Only a column of such notes across the system is a time signature: one staff's
     note close to the bar line is sung, and the bar keeps its meter."""
