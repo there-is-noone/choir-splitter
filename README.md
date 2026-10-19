@@ -128,6 +128,11 @@ so when one voice's bar comes up short:
 - augmentation dots OMR missed are restored;
 - notes pulled early by a missed rest are moved back to where they are printed.
 
+A time signature that changes inside a system (a 3/4 bar between 5/4 bars) is sometimes
+missed, and its digits are read as a note on every staff at the bar line. That column of
+notes is removed, and the bar is given the length the voices really sing there, for as
+long as no other time signature follows.
+
 Notes that aren't sung are dropped:
 - notes in a bar that shows a whole-bar rest, if they line up with nothing the other voices sing. These are small cue notes of an instrument printed in a resting staff ("Vn. II", "Vc."), or bar lines and courtesy time signatures misread as notes. A divisi voice that sings while the other voice of its staff rests is kept.
 - a note OMR took from the piano into a voice: next to a whole-bar rest, or far outside the voice's range on the piano side of the staff.
