@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from music21 import meter
 
 from choirsplit import omr
 from choirsplit.loaders import load_score
@@ -60,9 +61,12 @@ def _measure(number: int, voices: list[str], *, staff: int | None = None) -> str
     return "".join(parts)
 
 
-def audiveris_xml(parts: list[dict], beats: int = 4, beat_type: int = 4) -> str:
+def audiveris_xml(parts: list[dict], beats: int = 4, beat_type: int = 4,
+                  times: dict[int, tuple[int, int]] | None = None) -> str:
     """parts: {'name', 'clef' ('G'/'F'), 'bars': [[voice specs...], ...]} or, for a
-    grand staff, {'name', 'staves': [{'clef', 'bars'}, {'clef', 'bars'}]}."""
+    grand staff, {'name', 'staves': [{'clef', 'bars'}, {'clef', 'bars'}]}.
+    `times` maps a later bar index to a time signature (beats, beat-type) OMR read there;
+    whole-bar rests keep the length of the first one."""
     bar = DIVISIONS * beats * 4 // beat_type
     plist, bodies = [], []
     for i, part in enumerate(parts, start=1):
@@ -82,6 +86,9 @@ def audiveris_xml(parts: list[dict], beats: int = 4, beat_type: int = 4) -> str:
                          f"<time><beats>{beats}</beats><beat-type>{beat_type}</beat-type></time>"
                          + (f"<staves>{len(staves)}</staves>" if len(staves) > 1 else "")
                          + f"{clefs}</attributes>")
+            elif times and b in times:
+                attrs = (f"<attributes><time><beats>{times[b][0]}</beats>"
+                         f"<beat-type>{times[b][1]}</beat-type></time></attributes>")
             content = []
             for s, st in enumerate(staves):
                 if s:
@@ -275,6 +282,78 @@ def test_notes_are_never_moved_earlier(tmp_path):
 def test_retiming_needs_x_positions(tmp_path):
     merged = assemble_xml(tmp_path, audiveris_xml(missed_rest_parts("F4:8 B4:2 B4:2 B4:2")))
     assert rhythm(by_name(merged)["Soprano 2"])[0][1] == ("B4", 2.0, 0.5)
+
+
+# --------------------------------------------------------------------------- missed time signatures
+
+
+def missed_three_four(soprano_bar2: str = "G4:8@4 A4:12.@36"):
+    """5/4, then a 3/4 bar OMR missed, a 3/4 bar of rests, and a 2/4 it read (rests,
+    then a sung bar). The 3/4's digits came out as a half note at the bar line on every
+    staff but the second soprano's, sized to fill the bar to 5/4."""
+    rest = ["R"]
+    return [
+        {"name": "Soprano", "clef": "G",
+         "bars": [["F4:8@36 G4:12.@150"], [soprano_bar2], rest, rest, ["C5:8@20"]]},
+        {"name": "Soprano 2", "clef": "G",
+         "bars": [["F4:8@36 G4:12.@150"], ["A4:12.@36"], rest, rest, ["C5:8@20"]]},
+        {"name": "Alto", "clef": "G",
+         "bars": [["D4:8@36 E4:12.@150"], ["G4:8@4 F4:12.@36"], rest, rest, ["A4:8@20"]]},
+        {"name": "Bass", "clef": "F", "bars": [rest, ["R", "B2:8@4"], rest, rest, ["F3:8@20"]]},
+    ]
+
+
+def bar_starts(part) -> list[float]:
+    return [float(m.offset) for m in omr._measures(part)]
+
+
+def test_time_signature_misread_as_notes_is_removed_and_its_meter_kept(tmp_path):
+    """The Lord of the Rings suite, bar 5: the 3/4 between 5/4 bars was missed and its
+    digits read as a G on every staff, so the choir sang a G for two beats before its
+    held note. The G goes; the bar and the rests after it are 3 beats long until the
+    next time signature."""
+    merged = assemble_xml(tmp_path, audiveris_xml(missed_three_four(), beats=5, times={3: (2, 4)}))
+    parts = by_name(merged)
+    for p in parts.values():
+        assert bar_starts(p) == [0, 5, 8, 11, 13]
+        ts = [m.getElementsByClass(meter.TimeSignature).first() for m in omr._measures(p)]
+        assert [t.ratioString if t else None for t in ts] == ["5/4", "3/4", None, "2/4", None]
+    assert rhythm(parts["Soprano"])[1] == [("A4", 0.0, 3.0)]
+    assert rhythm(parts["Alto"])[1] == [("F4", 0.0, 3.0)]
+    assert not list(parts["Bass"].measure(2).recurse().notes)
+    removed = [(i.bar, i.voice) for i in merged.omr_issues if "time signature" in i.detail]
+    assert removed == [(2, "Soprano"), (2, "Alto"), (2, "Bass")]
+    voices = {t.name: t for t in extract_tracks(merged).voices}
+    assert [n.pitch for n in voices["Soprano"].notes] == [65, 67, 69, 72]
+
+
+def test_arc_over_a_misread_time_signature_becomes_a_tie(tmp_path):
+    """The alto holds its F over the 3/4 bar line. OMR saw the misread time signature as
+    the next note and so took the arc for a slur; without it, the F is held, not
+    sung again."""
+    parts = missed_three_four()
+    parts[2]["bars"][0] = ["D4:8@36 F4:12.@150"]
+    held, again = _note("F4:12.@150"), _note("F4:12.@36")
+    xml = audiveris_xml(parts, beats=5, times={3: (2, 4)})
+    for el, kind in ((held, "start"), (again, "stop")):
+        assert xml.count(el) == 1
+        xml = xml.replace(el, el.replace("</note>", f'<notations><slur type="{kind}" number="1"/></notations></note>'))
+    alto = next(t for t in extract_tracks(assemble_xml(tmp_path, xml)).voices if t.name == "Alto")
+    assert [n.pitch for n in alto.notes] == [62, 65, 69]
+    assert alto.notes[1].duration == pytest.approx(3 * alto.notes[0].duration)
+
+
+def test_a_note_at_the_bar_line_on_one_staff_is_not_a_time_signature(tmp_path):
+    """Only a column of such notes across the system is a time signature: one staff's
+    note close to the bar line is sung, and the bar keeps its meter."""
+    parts = missed_three_four("G4:8@4 A4:12.@90")
+    parts[1]["bars"][1] = ["F4:8@36 A4:12.@90"]
+    parts[2]["bars"][1] = ["D4:8@36 F4:12.@90"]
+    parts[3]["bars"][1] = ["R"]
+    merged = assemble_xml(tmp_path, audiveris_xml(parts, beats=5))
+    assert bar_starts(by_name(merged)["Soprano"])[:3] == [0, 5, 10]
+    assert rhythm(by_name(merged)["Soprano"])[1] == [("G4", 0.0, 2.0), ("A4", 2.0, 3.0)]
+    assert not [i for i in merged.omr_issues if "time signature" in i.detail]
 
 
 # --------------------------------------------------------------------------- piano notes in a voice

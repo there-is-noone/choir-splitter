@@ -36,6 +36,8 @@ recognised MusicXML is cleaned up before it is handed on:
 * If no staff carries a name, staves are named by layout (S/A/T/B, SSAATTBB, ...).
 * Stray notes next to a sung staff's printed whole-bar rest are dropped, and missed
   augmentation dots are restored where note positions line up with the other staves.
+* A time signature inside a system that OMR read as notes is removed again, and the
+  bars of its meter get the length the voices sing (see `drop_misread_time_signatures`).
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from music21 import clef, converter, instrument, layout, meter, note, stream, text
+from music21 import clef, converter, instrument, layout, meter, note, stream, text, tie
 
 from . import platforms
 from .check import Issue, voice_range
@@ -594,20 +596,30 @@ def _content_length(m: stream.Measure) -> float:
     return float(m.highestTime)
 
 
-def _nominal_lengths(seg: Segment) -> list[float]:
-    """Length (quarters) of each measure of a segment: the most common across its staves."""
+def _nominal_lengths(seg: Segment, meters: dict[int, float] | None = None) -> list[float]:
+    """Length (quarters) of each measure of a segment: the most common across its staves.
+
+    A whole-bar rest only says the staff is silent: OMR sizes it to the meter it assumes,
+    so it votes for the meter in effect. That is the time signature, or for measures in
+    `meters` the bar length of a time signature OMR missed (see `meters_of`).
+    """
+    meters = meters or {}
     out = []
     for i in seg.measure_range:
         lengths = []
-        bar = None
+        bar = meters.get(i)
+        if bar is None:
+            ms = [m for _, _, m in _bar_measures(seg, i)]
+            ts = next((ts for m in ms for ts in m.getElementsByClass(meter.TimeSignature)), None)
+            if ts is None and ms:
+                ts = ms[0].getContextByClass(meter.TimeSignature)
+            bar = float(ts.barDuration.quarterLength) if ts is not None else None
         for u in seg.units:
             for p in u.staves:
                 ms = _measures(p)
                 if i < len(ms):
-                    lengths.append(round(_content_length(ms[i]), 4))
-                    if bar is None:
-                        ts = ms[i].getContextByClass(meter.TimeSignature)
-                        bar = float(ts.barDuration.quarterLength) if ts is not None else None
+                    rest_only = bar is not None and _bar_rest(ms[i]) and not _has_notes(ms[i])
+                    lengths.append(bar if rest_only else round(_content_length(ms[i]), 4))
         lengths = [x for x in lengths if x > 0]
         if not lengths:
             out.append(bar or 4.0)
@@ -945,6 +957,105 @@ def drop_unaligned_beside_bar_rests(seg: Segment, report: Report | None = None) 
     return cleaned
 
 
+TIME_SIGNATURE_X = 8.0  # MusicXML tenths; a note head this close to the bar line is a time signature
+
+
+def _time_signature_heads(m: stream.Measure) -> list:
+    """Notes at the very start of a measure, printed where its bar line's time signature is."""
+    return [el for container in [m, *m.voices] for el in container.notes
+            if float(el.getOffsetBySite(container)) < _EPS
+            and (x := _x(el)) is not None and x <= TIME_SIGNATURE_X]
+
+
+def _remove_heads(m: stream.Measure, heads: list) -> None:
+    """Remove `heads` and move what follows each of them back to the start of the bar."""
+    for el in heads:
+        site, length = el.activeSite, float(el.duration.quarterLength)
+        site.remove(el)
+        for e in list(site.notesAndRests):
+            off = float(e.getOffsetBySite(site))
+            if getattr(e, "fullMeasure", None) is not True and off >= length - _EPS:
+                site.setElementOffset(e, off - length)
+        site.coreElementsChanged()
+    m.coreElementsChanged()
+
+
+def _tie_slurred_repeats(prev: stream.Measure, m: stream.Measure) -> None:
+    """Make a tie of an arc from the last note of `prev` to the same pitch at the start of
+    `m`. OMR took it for a slur because the note it saw next was the misread time
+    signature, which has another pitch."""
+    before = list(prev.recurse().notes)
+    if not before:
+        return
+    last = max(float(n.getOffsetInHierarchy(prev)) for n in before)
+    for n in m.recurse().getElementsByClass(note.Note):
+        if float(n.getOffsetInHierarchy(m)) > _EPS:
+            continue
+        for slur in n.getSpannerSites("Slur"):
+            start = slur.getFirst()
+            if (start is not n and isinstance(start, note.Note) and start.pitch == n.pitch
+                    and any(start is b for b in before)
+                    and abs(float(start.getOffsetInHierarchy(prev)) - last) < _EPS):
+                held = start.tie is not None and start.tie.type in ("stop", "continue")
+                start.tie = tie.Tie("continue" if held else "start")
+                n.tie = tie.Tie("stop")
+
+
+def drop_misread_time_signatures(seg: Segment, report: Report | None = None) -> dict[int, float | None]:
+    """Remove time signatures OMR read as notes, and tell the meter they printed.
+
+    Audiveris misses some time signatures printed inside a system (a 3/4 bar between 5/4
+    bars), and their digits then come out as a note on every staff, right at the bar line
+    and before the bar's first real note. It sizes that note to fill the bar to the old
+    meter, so the bar keeps the old length and every voice sings a note that isn't
+    there. Such a column of notes on most staves of the bar is removed, and the bar's
+    length is read from what the staves really sing: if at least two staves with notes
+    agree on a whole number of eighths, that is the new meter.
+
+    Returns {measure index: new bar length in quarters, or None if it couldn't be told}.
+    """
+    found: dict[int, float | None] = {}
+    for i in seg.measure_range[1:]:  # a system's first time signature is read with its clefs
+        located = _bar_measures(seg, i)
+        marked = [(u, s, m, heads) for u, s, m in located if (heads := _time_signature_heads(m))]
+        if len(marked) < 2 or 2 * len(marked) < len(located):
+            continue
+        for u, s, m, heads in marked:
+            _remove_heads(m, heads)
+            if report is not None:
+                report(i, u, s, "removed a time signature misread as a note")
+        for u, s, m in located:
+            _tie_slurred_repeats(_measures(seg.units[u].staves[s])[i - 1], m)
+        sung = Counter(round(_content_length(m), 4) for _, _, m in located
+                       if _has_notes(m) and not _bar_rest(m))
+        length, votes = sung.most_common(1)[0] if sung else (0.0, 0)
+        found[i] = length if votes >= 2 and votes == sum(sung.values()) and (2 * length).is_integer() else None
+    return found
+
+
+def meters_of(seg: Segment, found: dict[int, float | None], carried: float | None
+              ) -> tuple[dict[int, float], float | None]:
+    """Bar lengths of the measures of a segment that are in a meter OMR missed.
+
+    A meter told by `drop_misread_time_signatures` holds until the next time signature
+    (one OMR read, or another one it missed), across systems. `carried` is the meter
+    still in effect from the previous segment. Returns ({measure index: bar length},
+    the meter in effect after the segment)."""
+    out: dict[int, float] = {}
+    for i in seg.measure_range:
+        if i in found:
+            carried = found[i]
+        elif any(m.getElementsByClass(meter.TimeSignature) for _, _, m in _bar_measures(seg, i)):
+            carried = None
+        if carried is not None:
+            out[i] = carried
+    return out, carried
+
+
+def _time_signature(length: float) -> meter.TimeSignature:
+    return meter.TimeSignature(f"{int(length)}/4" if float(length).is_integer() else f"{int(2 * length)}/8")
+
+
 def _bar_measures(seg: Segment, i: int) -> list[tuple[int, int, stream.Measure]]:
     """(unit index, staff index, measure) of measure `i` on every staff of a segment."""
     return [(u, s, ms[i]) for u, unit in enumerate(seg.units) for s, p in enumerate(unit.staves)
@@ -1036,15 +1147,17 @@ def assemble(scores: list[stream.Score], title_hint: str | None = None) -> strea
     number = 0
     page = system = 0
     previous_source: list[list[int | None]] = [[None] * n for n in n_staves]
+    carried: float | None = None  # bar length of a time signature OMR missed, until the next one
     for seg, mapping in zip(segments, mappings):
         page, system = (page + 1, 1) if seg.new_page else (page, system + 1)
-        lengths = _nominal_lengths(seg)
         first = number + 1 - seg.measure_range.start  # measure index -> number
 
         def report(i, u, s, detail, kind="fixed", mapping=mapping, first=first):
             log.append((first + i, mapping[u], s, kind, detail))
 
+        meters, carried = meters_of(seg, drop_misread_time_signatures(seg, report), carried)
         drop_unaligned_beside_bar_rests(seg, report)
+        lengths = _nominal_lengths(seg, meters)
         repair_missing_dots(seg, lengths, report)
         repair_onsets(seg, lengths, report)
         for i, u, s in unrecognised_bars(seg):
@@ -1053,6 +1166,13 @@ def assemble(scores: list[stream.Score], title_hint: str | None = None) -> strea
         for i, length in zip(seg.measure_range, lengths):
             number += 1
             locations[number] = (page, system)
+            # A time signature holds for every staff, also those OMR didn't see it on
+            # (or that are hidden in this system).
+            if i in meters and (i == seg.measure_range.start or meters.get(i - 1) != meters[i]):
+                bar_ts = _time_signature(meters[i])
+            else:
+                bar_ts = next((ts for _, _, mm in _bar_measures(seg, i)
+                               for ts in mm.getElementsByClass(meter.TimeSignature)), None)
             for k in range(n_logical):
                 u = slot_unit.get(k)
                 for s, dest in enumerate(out_parts[k]):
@@ -1067,10 +1187,15 @@ def assemble(scores: list[stream.Score], title_hint: str | None = None) -> strea
                             _carry_context(src, src_ms[i], m)
                             previous_source[k][s] = id(src)
                         if clip_measure(m, length):
-                            log.append((number, k, s, "suspect", "notes ran past the end of the bar and were cut"))
+                            log.append((number, k, s, "suspect", "notes ran past the end of the bar and were cut "
+                                        "(missed bar line?)"))
                     else:
                         m = _rest_measure(length)
                         previous_source[k][s] = None
+                    if bar_ts is not None:
+                        for ts in list(m.getElementsByClass(meter.TimeSignature)):
+                            m.remove(ts)
+                        m.insert(0, copy.deepcopy(bar_ts))
                     m.number = number
                     dest.insert(offset, m)
             offset += length
