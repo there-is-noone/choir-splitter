@@ -162,6 +162,15 @@ def test_export_musicxml_round_trips(short_alto, tmp_path, capsys):
             [(n.start, n.duration, n.pitch) for n in b.notes])
 
 
+def test_export_musicxml_goes_beside_the_tracks(short_alto, tmp_path, capsys):
+    tracks = tmp_path / "tracks"
+    assert main([str(short_alto), "--list", "-o", str(tracks), "--export-musicxml", "fixed.musicxml"]) == 0
+    assert (tracks / "fixed.musicxml").is_file()
+    assert main([str(short_alto), "--list", "--export-musicxml"]) == 0  # default name and directory
+    default = short_alto.with_name("short_alto_tracks") / "short_alto.musicxml"
+    assert default.is_file() and f"saved {default}" in capsys.readouterr().out
+
+
 def test_loaded_tracks_carry_the_issues(short_alto):
     st = load_tracks(short_alto)
     assert not st.recognised

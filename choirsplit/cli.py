@@ -41,8 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list", action="store_true", help="list the detected voices and exit")
     p.add_argument("--check", action="store_true",
                    help="list bars that look wrong (and what PDF recognition repaired) and exit")
-    p.add_argument("--export-musicxml", type=Path, metavar="FILE",
-                   help="also save the score as MusicXML, e.g. to correct a PDF reading in MuseScore")
+    p.add_argument("--export-musicxml", type=Path, nargs="?", const=Path(), metavar="FILE",
+                   help="also save the score as MusicXML, e.g. to correct a PDF reading in MuseScore; "
+                        "a bare file name (default: <score name>.musicxml) goes in the output directory")
     p.add_argument("--omr-dpi", type=int, metavar="N",
                    help="resolution to read PDFs at (default: Audiveris's 300)")
     return p
@@ -53,13 +54,17 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(stream_, "reconfigure"):  # e.g. a Windows console or pipe in cp1252
             stream_.reconfigure(errors="replace")
     args = build_parser().parse_args(argv)
+    out_dir = args.output or args.score.with_name(args.score.stem + "_tracks")
+    export = args.export_musicxml
+    if export is not None and export.parent == Path():  # no directory given: save it beside the tracks
+        export = out_dir / (export.name or args.score.stem + ".musicxml")
     # Every option goes through one Options object, so the CLI and process_file agree.
     opts = Options(
         mode=args.mode, full_mix=args.full_mix, fmt=args.fmt, bitrate=args.bitrate,
         bpm=args.bpm, tempo_scale=args.tempo_scale, transpose=args.transpose,
         others_gain=args.others_gain, include_accompaniment=args.include_accompaniment,
         split_voices=args.split_voices, split_chords=args.split_chords, only=args.only,
-        title=args.title, export_musicxml=args.export_musicxml, omr_dpi=args.omr_dpi,
+        title=args.title, export_musicxml=export, omr_dpi=args.omr_dpi,
     )
     listing = args.list or args.check
     try:
@@ -67,8 +72,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.fmt == "mp3" and not listing:
             require_ffmpeg()  # fail now, not after a slow PDF recognition
         st = load_tracks(args.score, opts)
-        if args.export_musicxml:
-            print(f"saved {args.export_musicxml}")
+        if export is not None:
+            print(f"saved {export}")
         if args.list:
             print(f"{st.title} ({st.duration:.1f}s)")
             for i, t in enumerate(st.tracks, start=1):
@@ -77,7 +82,6 @@ def main(argv: list[str] | None = None) -> int:
             print_check(st)
         if listing:
             return 0
-        out_dir = args.output or args.score.with_name(args.score.stem + "_tracks")
         written = process_tracks(st, out_dir, opts)
     except (ScoreLoadError, EncoderError, ValueError, OSError) as exc:
         print(f"choir-split: error: {exc}", file=sys.stderr)
@@ -107,7 +111,7 @@ def print_check(st) -> None:
     elif not fixed:
         print("No problems found.")
     if suspects and st.recognised:
-        print("To correct them: run with --export-musicxml FILE, fix the bars in MuseScore, "
+        print("To correct them: run with --export-musicxml, fix the bars in MuseScore, "
               "then run choir-split on the saved file.")
 
 

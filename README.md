@@ -66,7 +66,7 @@ choir-split scan.pdf --check               # which bars of a PDF reading to chec
 | `--title TITLE` | song title for the file names and the MP3 album tag (default: the score's title, else its file name) |
 | `--list` | print the detected voices and exit |
 | `--check` | list the bars that look wrong (and, for PDFs, what was repaired) and exit |
-| `--export-musicxml FILE` | also save the score as MusicXML, e.g. to correct a PDF reading in MuseScore |
+| `--export-musicxml [FILE]` | also save the score as MusicXML, e.g. to correct a PDF reading in MuseScore. A bare file name (default: `<score name>.musicxml`) is saved in the output directory beside the tracks; a path with a directory is used as given |
 | `--omr-dpi N` | resolution to read PDFs at (default: Audiveris's 300) |
 
 ## Input formats
@@ -177,9 +177,9 @@ To fix them for good, save the cleaned score, correct it in MuseScore (free), an
 the tracks from the corrected file. That file loads without OMR from then on:
 
 ```bash
-choir-split lullaby.pdf --export-musicxml lullaby.musicxml --list
-# open lullaby.musicxml in MuseScore, fix the bars --check listed, save
-choir-split lullaby.musicxml
+choir-split lullaby.pdf --export-musicxml --list
+# open lullaby_tracks/lullaby.musicxml in MuseScore, fix the bars --check listed, save
+choir-split lullaby_tracks/lullaby.musicxml -o lullaby_tracks
 ```
 
 If a scan reads badly, try another resolution with `--omr-dpi`. Audiveris renders PDFs at
