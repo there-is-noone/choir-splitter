@@ -430,6 +430,60 @@ def test_no_second_reading_when_nothing_is_missed(clean_env):
     assert len(log.read_text().splitlines()) == 1
 
 
+TOO_LARGE = "WARN  [pn#1]  SheetStub 411  | Too large image: 108,108,572 pixels (vs 20,000,000 max)"
+
+
+def fake_audiveris_for_large_pages(clean_env, xml: Path) -> Path:
+    """A fake Audiveris that, like the real one, drops pages over 20 megapixels: at its
+    default 300 dpi a poster-sized page is too large, at -constant ...=127 it fits."""
+    log = clean_env / "calls.jsonl"
+    make_exe(clean_env / "empty-bin" / "Audiveris", f"""
+        import json, os, shutil, sys
+        args = sys.argv[1:]
+        with open({str(log)!r}, "a") as fh:
+            fh.write(json.dumps(args) + "\\n")
+        if "-constant" not in args or args[-1].endswith(".png"):
+            print({TOO_LARGE!r})
+            print("java.lang.Exception: Error in export")
+            sys.exit(1)
+        shutil.copy({str(xml)!r}, os.path.join(args[args.index("-output") + 1], "score.musicxml"))
+    """)
+    return log
+
+
+def test_pages_too_large_for_audiveris_are_read_at_a_resolution_that_fits(
+        clean_env, monkeypatch, satb_xml, capsys):
+    log = fake_audiveris_for_large_pages(clean_env, satb_xml)
+    monkeypatch.setenv("CHOIRSPLIT_OMR_CACHE", str(clean_env / "cache"))
+    pdf = clean_env / "poster.pdf"
+    pdf.write_bytes(b"%PDF-1.5\n")
+    score = load_score(pdf)
+    assert [p.partName for p in score.parts] == ["Soprano", "Alto", "Tenor", "Bass"]
+    calls = [json.loads(x) for x in log.read_text().splitlines()]
+    assert len(calls) == 2 and "-constant" not in calls[0]
+    assert f"{omr.AUDIVERIS_PDF_RESOLUTION}=127" in calls[1]  # 300 * sqrt(20M / 108M), rounded down
+    assert "too large for Audiveris at 300 dpi; reading them at 127 dpi" in capsys.readouterr().err
+    # The cache remembers the resolution, which a second reading is scaled from.
+    assert omr.recognise(pdf, omr.find_engine())[1] == 127
+    assert len(log.read_text().splitlines()) == 2
+
+
+def test_an_image_too_large_for_audiveris_says_so(clean_env, satb_xml):
+    fake_audiveris_for_large_pages(clean_env, satb_xml)
+    png = clean_env / "huge.png"
+    png.write_bytes(b"\x89PNG")
+    with pytest.raises(ScoreLoadError, match=r"too large for Audiveris \(108,108,572 pixels.*scale it down"):
+        load_score(png)
+
+
+def test_fitting_dpi():
+    assert omr.fitting_dpi("nothing wrong", None) is None
+    assert omr.fitting_dpi(TOO_LARGE, None) == 127
+    assert omr.fitting_dpi(TOO_LARGE, 250) == 106
+    smaller = TOO_LARGE.replace("108,108,572", "30,000,000")
+    assert omr.fitting_dpi(smaller + "\n" + TOO_LARGE, None) == 127  # the largest page decides
+
+
 @pytest.mark.parametrize("value", ["abc", "50", "5000"])
 def test_bad_omr_dpi_environment_variable(monkeypatch, value):
     monkeypatch.setenv("CHOIRSPLIT_OMR_DPI", value)
@@ -601,6 +655,17 @@ def test_unnamed_open_score_gets_satb_names():
     s = stream.Score([line("Voice", [whole(p)]) for p in ("C5", "E4", "G3", "C3")])
     merged = omr.assemble([s])
     assert [p.partName for p in merged.parts] == ["Soprano", "Alto", "Tenor", "Bass"]
+
+
+def test_one_unreadable_label_is_named_from_the_others():
+    """OCR missed only the Soprano label (Audiveris then says 'Voice')."""
+    names = ["Voice", "Alto", "Tenor", "Bass"]
+    s = stream.Score([line(n, [whole(p)]) for n, p in zip(names, ("C5", "E4", "G3", "C3"))])
+    assert [p.partName for p in omr.assemble([s]).parts] == ["Soprano", "Alto", "Tenor", "Bass"]
+    # Other names around the gap than the usual layout: nothing to go by.
+    names = ["Voice", "Alto", "Baritone", "Bass"]
+    s = stream.Score([line(n, [whole(p)]) for n, p in zip(names, ("C5", "E4", "G3", "C3"))])
+    assert [p.partName for p in omr.assemble([s]).parts] == names
 
 
 def test_unnamed_eight_staves_get_ssaattbb_names():

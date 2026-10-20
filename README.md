@@ -186,6 +186,11 @@ If a scan reads badly, try another resolution with `--omr-dpi`. Audiveris render
 300 dpi by default. Higher is not automatically better: on our test scores, 400 dpi
 read worse than 300. Results for each resolution are cached separately.
 
+Audiveris refuses pages of more than 20 million pixels, which is a poster-sized PDF page
+(some scans are 29 × 42 inches) at 300 dpi. choirsplit then reads the PDF again at the
+highest resolution that fits, and says so. The notes on such pages are drawn large, so
+this loses nothing.
+
 | Variable | Meaning |
 | --- | --- |
 | `CHOIRSPLIT_AUDIVERIS` | Audiveris launcher or install directory |
