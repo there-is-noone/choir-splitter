@@ -87,6 +87,10 @@ AUDIVERIS_PDF_RESOLUTION = "org.audiveris.omr.image.ImageLoading.pdfResolution"
 # A second reading at this resolution often sees note heads the default one misses
 # (Mendelssohn's Psalm 100: 5 empty sung bars at 250 dpi against 14 at 300 and 26 at 400).
 SECOND_READING_DPI = 250
+AUDIVERIS_DEFAULT_DPI = 300
+# Audiveris drops every page with more pixels than its limit (20 million): a poster-sized
+# PDF page at 300 dpi. Such PDFs are read again at a resolution that fits.
+TOO_LARGE_IMAGE = re.compile(r"Too large image: ([\d,.]+) pixels \(vs ([\d,.]+) max\)")
 _EPS = 1e-6
 
 
@@ -283,26 +287,66 @@ def _run(argv: list[str], timeout: float, env: dict[str, str], what: str) -> Non
                      "(set CHOIRSPLIT_OMR_TIMEOUT to allow more time)") from None
     except OSError as exc:
         raise _error(f"could not run {what} ({argv[0]}): {exc}") from exc
+    _run.last_output = proc.stdout + proc.stderr  # for error messages and retries
     if proc.returncode != 0:
-        raise _error(f"{what} failed with exit code {proc.returncode}:\n{_tail(proc.stdout + proc.stderr)}")
-    _run.last_output = proc.stdout + proc.stderr  # for error messages when nothing is exported
+        raise _error(f"{what} failed with exit code {proc.returncode}:\n{_tail(_run.last_output)}")
 
 
 _run.last_output = ""
 
 
+def fitting_dpi(output: str, dpi: int | None) -> int | None:
+    """The resolution at which the largest page Audiveris refused as too large (see
+    TOO_LARGE_IMAGE in its `output`) fits its pixel limit; None if it refused none."""
+    sizes = [(int(re.sub(r"\D", "", px)), int(re.sub(r"\D", "", top)))
+             for px, top in TOO_LARGE_IMAGE.findall(output)]
+    if not sizes:
+        return None
+    pixels, limit = max(sizes)
+    return int((dpi or AUDIVERIS_DEFAULT_DPI) * (limit / pixels) ** 0.5 * 0.99)
+
+
+def _run_audiveris(engine: Engine, path: Path, outdir: Path, timeout: float,
+                   dpi: int | None) -> int | None:
+    """Run Audiveris on `path`; returns the resolution the PDF was read at (None: its
+    default). Pages too large for Audiveris are read again once at a resolution that fits."""
+    from .loaders import ScoreLoadError
+
+    is_pdf = path.suffix.lower() == ".pdf"
+    for attempt in range(2):
+        options = ["-constant", f"{AUDIVERIS_PDF_RESOLUTION}={dpi}"] if dpi is not None and is_pdf else []
+        argv = [*engine.argv, "-batch", "-export", *options, "-output", str(outdir), "--", str(path)]
+        try:
+            _run(argv, timeout, engine.env, "Audiveris")
+            failure = None
+        except ScoreLoadError as exc:
+            failure = exc
+        smaller = fitting_dpi(_run.last_output, dpi)
+        if smaller is None:
+            if failure is not None:
+                raise failure
+            return dpi
+        if not is_pdf or attempt or smaller < 50:
+            m = TOO_LARGE_IMAGE.search(_run.last_output)
+            raise _error(f"{path.name} is too large for Audiveris ({m.group(1)} pixels, at most "
+                         f"{m.group(2)}); scale it down and try again")
+        print(f"choirsplit: the pages of {path.name} are too large for Audiveris at "
+              f"{dpi or AUDIVERIS_DEFAULT_DPI} dpi; reading them at {smaller} dpi", file=sys.stderr)
+        dpi = smaller
+        shutil.rmtree(outdir, ignore_errors=True)
+        outdir.mkdir(parents=True)
+    return dpi
+
+
 def run_engine(engine: Engine, path: Path, outdir: Path, timeout: float | None = None,
-               dpi: int | None = None) -> list[Path]:
-    """Run OMR on `path`, return the produced MusicXML files in score order. `dpi` is the
-    resolution a PDF is rendered at (default: Audiveris's own, 300 for {image} engines)."""
+               dpi: int | None = None) -> tuple[list[Path], int | None]:
+    """Run OMR on `path`, return the produced MusicXML files in score order and the
+    resolution a PDF was read at. `dpi` is the resolution to render a PDF at (default:
+    Audiveris's own, 300 for {image} engines); Audiveris may need a lower one."""
     timeout = default_timeout(path) if timeout is None else timeout
     outdir.mkdir(parents=True, exist_ok=True)
     if engine.name == "audiveris":
-        options = []
-        if dpi is not None and path.suffix.lower() == ".pdf":
-            options = ["-constant", f"{AUDIVERIS_PDF_RESOLUTION}={dpi}"]
-        argv = [*engine.argv, "-batch", "-export", *options, "-output", str(outdir), "--", str(path)]
-        _run(argv, timeout, engine.env, "Audiveris")
+        dpi = _run_audiveris(engine, path, outdir, timeout, dpi)
     else:
         if engine.per_page and path.suffix.lower() == ".pdf":
             pages = rasterize_pdf(path, outdir / "_pages", dpi=dpi or 300)
@@ -324,7 +368,7 @@ def run_engine(engine: Engine, path: Path, outdir: Path, timeout: float | None =
             f"OMR produced no MusicXML for {path.name}; the scan may be too blurry, skewed or "
             f"low-resolution (300 dpi recommended).\nEngine output:\n{_tail(_run.last_output)}"
         )
-    return files
+    return files, dpi
 
 
 # --------------------------------------------------------------------------- cache
@@ -350,23 +394,26 @@ def cache_key(path: Path, engine: Engine, dpi: int | None = None) -> str:
     return h.hexdigest()[:32]
 
 
-def recognise(path: Path, engine: Engine, dpi: int | None = None) -> list[stream.Score]:
-    """Run OMR on `path` (or reuse the cached result) and parse the MusicXML it produced."""
+def recognise(path: Path, engine: Engine, dpi: int | None = None) -> tuple[list[stream.Score], int | None]:
+    """Run OMR on `path` (or reuse the cached result) and parse the MusicXML it produced.
+    Also returns the resolution the PDF was read at (None: the engine's default)."""
     root = _cache_root()
     entry = root / cache_key(path, engine, dpi) if root else None
     if entry is not None and (entry / "done").exists():
         files = collect_outputs(entry)
         if files:
-            return parse_outputs(files)
+            stamp = (entry / "done").read_text(encoding="utf-8").split("\n")
+            read_at = stamp[2] if len(stamp) > 2 else ""
+            return parse_outputs(files), int(read_at) if read_at.isdigit() else dpi
     with tempfile.TemporaryDirectory(prefix="choirsplit-omr-") as tmp:
-        files = run_engine(engine, path, Path(tmp) / "out", dpi=dpi)
+        files, read_at = run_engine(engine, path, Path(tmp) / "out", dpi=dpi)
         scores = parse_outputs(files)
         if entry is not None:
             try:
-                _store(entry, files, f"{path.name}\n{engine.cache_tag}\n{dpi or ''}\n")
+                _store(entry, files, f"{path.name}\n{engine.cache_tag}\n{read_at or ''}\n")
             except OSError as exc:  # a read-only cache must not break loading
                 print(f"choirsplit: could not cache OMR result: {exc}", file=sys.stderr)
-    return scores
+    return scores, read_at
 
 
 def _store(entry: Path, files: list[Path], stamp: str) -> None:
@@ -424,29 +471,33 @@ def load(path: Path, dpi: int | None = None) -> stream.Score:
     if engine is None:
         raise _error(f"cannot read {path.name}: " + install_hint())
     dpi = omr_dpi(dpi)
-    scores = recognise(path, engine, dpi)
+    scores, read_at = recognise(path, engine, dpi)
     if not scores:
         raise _error(f"OMR found no music in {path.name}")
     if dpi is None and engine.name == "audiveris" and path.suffix.lower() == ".pdf":
         missed = sum(len(unrecognised_bars(seg)) for s in scores for seg in segments_of(s))
         if missed:
-            second_reading(path, engine, scores, missed)
+            # Pages too large for the default resolution are read again at the same ratio.
+            again = SECOND_READING_DPI if read_at is None else \
+                round(read_at * SECOND_READING_DPI / AUDIVERIS_DEFAULT_DPI)
+            second_reading(path, engine, scores, missed, again)
     return assemble(scores, title_hint=path.stem)
 
 
-def second_reading(path: Path, engine: Engine, scores: list[stream.Score], missed: int) -> int:
-    """Read the PDF again at SECOND_READING_DPI and fill the `missed` empty sung bars of
-    `scores` from it where the readings agree. Returns the bars filled."""
+def second_reading(path: Path, engine: Engine, scores: list[stream.Score], missed: int,
+                   dpi: int = SECOND_READING_DPI) -> int:
+    """Read the PDF again at `dpi` and fill the `missed` empty sung bars of `scores` from
+    it where the readings agree. Returns the bars filled."""
     from .loaders import ScoreLoadError
 
     print(f"choirsplit: {missed} sung bar{'s' if missed > 1 else ''} not recognised; reading "
-          f"{path.name} again at {SECOND_READING_DPI} dpi", file=sys.stderr)
+          f"{path.name} again at {dpi} dpi", file=sys.stderr)
     try:
-        second = recognise(path, engine, SECOND_READING_DPI)
+        second, dpi = recognise(path, engine, dpi)
     except ScoreLoadError as exc:
         print(f"choirsplit: second reading failed: {exc}", file=sys.stderr)
         return 0
-    return fill_from_second_reading(scores, second, SECOND_READING_DPI)
+    return fill_from_second_reading(scores, second, dpi)
 
 
 # --------------------------------------------------------------------------- post-processing
@@ -1558,7 +1609,10 @@ def name_unnamed_parts(score: stream.Score, lines: dict[int, int] | None = None)
     everything = list(score.parts)
     acc = [is_accompaniment(p) for p in everything]
     parts = everything if everything and all(acc) else [p for p, a in zip(everything, acc) if not a]
-    if not parts or any(not _is_default_name(p.partName) for p in parts):
+    unnamed = [i for i, p in enumerate(parts) if _is_default_name(p.partName)]
+    if len(unnamed) == 1 < len(parts):
+        _name_the_gap(parts, unnamed[0], lines)
+    if not parts or len(unnamed) < len(parts):
         return
     counts = [(lines or {}).get(id(p)) or _voice_count(p) for p in parts]
     lines = counts
@@ -1589,6 +1643,20 @@ def name_unnamed_parts(score: stream.Score, lines: dict[int, int] | None = None)
         new.partName = label
         new.partAbbreviation = " ".join(_abbrev(x) for x in mine)
         score.replace(p, new)
+
+
+def _name_the_gap(parts: list[stream.Part], i: int, lines: dict[int, int] | None) -> None:
+    """Name the one unnamed sung staff `parts[i]` ("Voice" above Alto, Tenor and Bass: OCR
+    missed the Soprano label) when the other names are the standard layout around it."""
+    layout = VOICE_LAYOUTS.get(len(parts))
+    if layout is None or any(((lines or {}).get(id(p)) or 1) != 1 for p in parts):
+        return
+    if all((p.partName or "").strip().casefold() == name.casefold()
+           for j, (p, name) in enumerate(zip(parts, layout)) if j != i):
+        part = parts[i]
+        part.partName, part.partAbbreviation = layout[i], _abbrev(layout[i])
+        for inst in part.getElementsByClass(instrument.Instrument):
+            inst.partName = layout[i]
 
 
 def is_tenor_name(name: str) -> bool:
