@@ -142,6 +142,31 @@ def test_check_lists_suspect_bars(short_alto, capsys):
     assert "--export-musicxml" not in out  # the hint is for recognised PDFs only
 
 
+def test_check_works_for_written_scores(short_alto, capsys):
+    """Not only for PDFs: a written score gets notation hints and a hint how to fix it."""
+    assert main([str(short_alto), "--check"]) == 0
+    out = capsys.readouterr().out
+    assert "notes fill 3.5 of 4 beats (missing rest or wrong length?)" in out
+    assert "fix the bars in MuseScore" in out
+
+
+def test_midi_lines_stopping_early_are_not_reported():
+    """MIDI has no written rests, so a line stopping mid-bar is not a missing rest."""
+    score = build_score(
+        build_part("Soprano", ["C5:1 D5:1 E5:2", "F5:4"]),
+        build_part("Alto", ["A4:1 B4:1 C5:1.5", "C5:4"]),
+        build_part("Tenor", ["E4:1 F4:1 G4:2", "A4:4"]),
+    )
+    assert kinds(check_score(score, source="notation")) == [(1, "Alto", "notes fill 3.5 of 4 beats")]
+    assert check_score(score, source="midi") == []
+
+
+def test_reminder_after_a_normal_run_of_any_file(short_alto, tmp_path, capsys):
+    assert main([str(short_alto), "-o", str(tmp_path / "out"), "--format", "wav", "--mode", "solo",
+                 "--no-full-mix", "--only", "Soprano"]) == 0
+    assert "1 bar of the score looks wrong; run again with --check" in capsys.readouterr().err
+
+
 def test_check_on_a_clean_score(tmp_path, capsys):
     path = write_score(build_score(build_part("Soprano", ["C5:4"]), build_part("Alto", ["A4:4"])),
                        tmp_path, "clean")
