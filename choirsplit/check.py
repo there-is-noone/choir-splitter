@@ -1,8 +1,9 @@
 """Find bars where a score is probably wrong, so they can be checked by hand.
 
-It runs on every input; a score read from a PDF needs it most. Optical music recognition misses dots and rests, reads stray marks as notes and gets
-pitches wrong. ``omr.assemble`` repairs what it safely can and logs each repair as a
-``fixed`` Issue; ``check_score`` looks at the result and reports ``suspect`` bars:
+It runs on every input; a score read from a PDF needs it most. Optical music
+recognition misses dots and rests, reads stray marks as notes and gets pitches wrong.
+``omr.assemble`` repairs what it safely can and logs each repair as a ``fixed`` Issue;
+``check_score`` looks at the result and reports ``suspect`` bars:
 
 * a sung line that runs out before the end of its bar (missed dot or rest: the notes
   after it come in early);
