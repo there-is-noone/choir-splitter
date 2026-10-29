@@ -158,8 +158,9 @@ def test_export_musicxml_round_trips(short_alto, tmp_path, capsys):
     again = load_tracks(out)
     assert [(t.name, t.kind) for t in again.tracks] == [(t.name, t.kind) for t in first.tracks]
     for a, b in zip(first.tracks, again.tracks):
-        assert [(n.start, n.duration, n.pitch) for n in a.notes] == pytest.approx(
-            [(n.start, n.duration, n.pitch) for n in b.notes])
+        assert len(a.notes) == len(b.notes)
+        for x, y in zip(a.notes, b.notes):  # pytest.approx takes no nested sequences
+            assert (x.start, x.duration, x.pitch) == pytest.approx((y.start, y.duration, y.pitch))
 
 
 def test_export_musicxml_goes_beside_the_tracks(short_alto, tmp_path, capsys):

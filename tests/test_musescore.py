@@ -132,6 +132,18 @@ def test_ties_tuplets_and_tempo_change():
     assert st.duration == pytest.approx(11.5)
 
 
+def test_tempo_word_after_the_opening_is_ignored(tmp_path):
+    """'Allegro' in place of 'q = 120' at bar 3: the piece stays at its opening 60 bpm."""
+    text = (FIXTURES / "ties_tuplets_tempo.mscx").read_text(encoding="utf-8")
+    assert text.count("<text>♩ = 120</text>") == 1
+    path = tmp_path / "words.mscx"
+    path.write_text(text.replace("<text>♩ = 120</text>", "<text><b>Allegro</b></text>"), encoding="utf-8")
+    st = tracks(path.name, folder=tmp_path)
+    notes = [(round(n.start, 4), n.pitch, round(n.duration, 4)) for n in st.voices[0].notes]
+    assert notes[6:8] == [(8.0, 79, 1.5), (9.5, 77, 0.5)]
+    assert st.duration == pytest.approx(15.0)
+
+
 def test_pickup_measure():
     score = load_score(FIXTURES / "pickup.mscx")
     measures = list(score.parts[0].getElementsByClass(stream.Measure))

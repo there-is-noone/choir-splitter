@@ -2,7 +2,7 @@
 
 The native reader understands the MuseScore 2, 3 and 4 file formats and keeps
 what matters for practice tracks: parts and staves, measures, voices, notes,
-chords, rests, ties, tuplets, tempo, time signatures, pickups and repeats.
+chords, rests, ties, tuplets, tempo marks, time signatures, pickups and repeats.
 Grace notes, ornaments, dynamics and layout are skipped.
 
 Mode (``load(path, mode=...)`` or the CHOIRSPLIT_MUSESCORE_MODE env var):
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -560,7 +561,10 @@ class _Reader:
                 return
             if qps > 0:
                 mm = tempo.MetronomeMark(number=round(tempo_to_bpm(qps), 3), referent=1.0)
-                mm.numberImplicit = False
+                # "<sym>metNoteQuarterUp</sym> = 72" is a written tempo; "Andante" or
+                # "a tempo" is a word, which only counts as the opening tempo.
+                text = el.find("text")
+                mm.numberImplicit = text is not None and not re.search(r"=\s*\d", _text(text))
                 m.events.append(_Event(offset, -1, mm))
 
     # -- voltas

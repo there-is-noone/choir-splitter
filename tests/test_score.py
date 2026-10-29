@@ -11,7 +11,9 @@ import os
 import statistics
 
 import pytest
-from music21 import bar, chord, corpus, instrument, note, pitch, spanner, stream, tempo, tie
+from music21 import (
+    bar, chord, corpus, dynamics, expressions, instrument, note, pitch, spanner, stream, tempo, tie,
+)
 
 from choirsplit.score import (
     DEFAULT_VELOCITY,
@@ -215,12 +217,14 @@ def test_voices_share_one_timeline(make_part, make_score, load_tracks):
     assert st.duration == pytest.approx(12.0)
 
 
-def test_velocity_is_taken_from_the_note():
+def test_dynamics_are_ignored():
+    """A steady recording: every note is equally loud, whatever the score's dynamics."""
     p = build_part("Soprano", ["C5 D5:3"])
     first = p.recurse().notes.first()
     first.volume.velocity = 110
+    p.getElementsByClass(stream.Measure)[0].insert(0, dynamics.Dynamic("pp"))
     st = extract_tracks(build_score(p, bpm=60))
-    assert [n.velocity for n in st.tracks[0].notes] == [110, DEFAULT_VELOCITY]
+    assert [n.velocity for n in st.tracks[0].notes] == [DEFAULT_VELOCITY, DEFAULT_VELOCITY]
 
 
 def test_microtones_survive():
@@ -390,6 +394,48 @@ def test_text_tempo_indication(make_part, make_score, load_tracks):
     p.getElementsByClass(stream.Measure)[0].insert(0, tempo.MetronomeMark("adagio"))
     st = extract_tracks(make_score(p))
     assert 0 < st.duration < 60
+
+
+def test_opening_tempo_word_sets_the_tempo(make_part, make_score, load_tracks):
+    p = make_part("Soprano", ["C5:4", "D5:4"])
+    p.getElementsByClass(stream.Measure)[0].insert(0, tempo.MetronomeMark("adagio"))
+    st = load_tracks(make_score(p))
+    spq = tempo.MetronomeMark("adagio").secondsPerQuarter()
+    assert onsets_of(st.tracks[0]) == pytest.approx([0.0, 4 * spq], abs=1e-3)
+
+
+@pytest.mark.parametrize("later", [
+    lambda: tempo.MetronomeMark("lento"),          # a tempo word
+    lambda: tempo.MetronomeMark("a tempo"),
+    lambda: tempo.MetronomeMark(numberSounding=30),  # playback-only <sound tempo>, nothing printed
+])
+def test_later_tempo_words_are_ignored(make_part, make_score, load_tracks, later):
+    p = make_part("Soprano", ["C5:4", "D5:4", "E5:4"])
+    p.getElementsByClass(stream.Measure)[1].insert(0, later())
+    st = load_tracks(make_score(p, bpm=60))
+    assert track_summary(st)["Soprano"] == [(0.0, 4.0, P["C5"]), (4.0, 4.0, P["D5"]), (8.0, 4.0, P["E5"])]
+
+
+def test_later_written_tempo_applies_from_its_bar(make_part, make_score, load_tracks):
+    p = make_part("Soprano", ["C5:4", "D5:4", "E5:4"])
+    ms = p.getElementsByClass(stream.Measure)
+    ms[1].insert(0, tempo.MetronomeMark("lento"))
+    ms[2].insert(0, tempo.MetronomeMark("allegro", number=120))  # "Allegro q = 120"
+    st = load_tracks(make_score(p, bpm=60))
+    assert track_summary(st)["Soprano"] == [(0.0, 4.0, P["C5"]), (4.0, 4.0, P["D5"]), (8.0, 2.0, P["E5"])]
+
+
+@pytest.mark.parametrize("words, last", [
+    ("♩ = 120", 2.0),  # MuseScore's export of a written tempo: followed
+    ("Lento", 4.0),    # a tempo word with a playback tempo: left out
+])
+def test_words_with_sound_tempo(make_part, make_score, words, last):
+    p = make_part("Soprano", ["C5:4", "D5:4", "E5:4"])
+    m = p.getElementsByClass(stream.Measure)[2]
+    m.insert(0, expressions.TextExpression(words))
+    m.insert(0, tempo.MetronomeMark(numberSounding=120))
+    st = extract_tracks(make_score(p, bpm=60))
+    assert track_summary(st)["Soprano"] == [(0.0, 4.0, P["C5"]), (4.0, 4.0, P["D5"]), (8.0, last, P["E5"])]
 
 
 def test_bpm_override_ignores_score_tempo(make_part, make_score, load_tracks):
@@ -685,6 +731,40 @@ def test_closed_score_voice_two_only_in_memory(make_part, make_score):
     st = extract_tracks(make_score(women, bpm=60))
     assert pitches_of(by_name(st)["Alto"]) == [P["C5"], P["A4"]]
     assert pitches_of(by_name(st)["Soprano"]) == [P["E5"]]
+
+
+def test_voice_two_copying_voice_one_is_one_track(make_part, make_score, load_tracks):
+    """OMR wrote a single line into both voices (Stella splendens): one track, not two."""
+    tenor = make_part("Tenor", [("C4 D4 E4 F4", "C4 D4 E4 F4"), ("G4:2 E4:2", "G4:2 E4:2")])
+    st = extract_tracks(make_score(tenor, bpm=60))
+    assert [t.name for t in st.tracks] == ["Tenor"]
+    assert pitches_of(st.tracks[0]) == [P["C4"], P["D4"], P["E4"], P["F4"], P["G4"], P["E4"]]
+    assert st.merged == ["Tenor"]
+
+
+def test_near_copy_is_one_track(make_part, make_score):
+    """One misread note in 40 does not make a second line."""
+    bars = ["C5 D5 E5 F5", "G5 F5 E5 D5", "C5 E5 G5 E5", "D5 F5 A5 F5", "E5 D5 C5 D5"] * 2
+    second = list(bars)
+    second[3] = "D5 F5 G5 F5"
+    st = extract_tracks(make_score(make_part("Superius", list(zip(bars, second))), bpm=60))
+    assert [t.name for t in st.tracks] == ["Superius"]
+
+
+def test_mostly_unison_divisi_keeps_two_tracks(make_part, make_score):
+    """Divisi for 4 bars out of 16 is a real second line (Psalm 100's soli)."""
+    unison = [("C5 D5 E5 F5", "C5 D5 E5 F5")] * 12
+    divisi = [("E5 F5 G5 A5", "C5 D5 E5 F5")] * 4
+    st = extract_tracks(make_score(make_part("Soprano", unison + divisi), bpm=60))
+    assert [t.name for t in st.tracks] == ["Soprano 1", "Soprano 2"]
+    assert st.merged == []
+
+
+def test_hymnal_doubled_unisons_are_one_track(make_part, make_score, load_tracks):
+    part = make_part("Women", ["E5+E5 F5+F5 G5+G5:2", "A5+A5 G5+G5 F5+F5:2"])
+    st = load_tracks(make_score(part, bpm=60))
+    assert [t.name for t in st.tracks] == ["Women"]
+    assert pitches_of(st.tracks[0]) == [P["E5"], P["F5"], P["G5"], P["A5"], P["G5"], P["F5"]]
 
 
 def test_hymnal_chords_split_top_and_bottom(make_part, make_score, load_tracks):

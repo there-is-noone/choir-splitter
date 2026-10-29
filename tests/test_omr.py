@@ -646,6 +646,19 @@ def test_revoicing_respects_a_resting_voice(make_part):
     assert [int(n.pitch) for n in alto.notes] == [69, 71, 72, 74, 69, 71, 72, 74]
 
 
+def test_one_line_in_two_voices_stays_one_line(make_part):
+    """Audiveris sometimes puts a single line into two voices; with polyphony counted from
+    the very first overlap (threshold 0) it would be re-voiced into two copies."""
+    p = make_part("Tenor", [("C4 D4 E4 F4", "C4 D4 E4 F4"), ("G4:2 E4:2", "G4:2 E4:2"), "D4:4"])
+    omr.POLYPHONY_THRESHOLD, saved = 0.0, omr.POLYPHONY_THRESHOLD
+    try:
+        assert omr.tidy_voices(p) == 1
+    finally:
+        omr.POLYPHONY_THRESHOLD = saved
+    assert all(not m.voices for m in p.getElementsByClass(stream.Measure))
+    assert [n.pitch.nameWithOctave for n in p.flatten().notes] == ["C4", "D4", "E4", "F4", "G4", "E4", "D4"]
+
+
 def test_chordal_single_voice_counts_as_two_lines(make_part):
     p = make_part("Voice", ["C5+A4 D5+B4 E5+C5 F5"] * 2)
     assert omr.tidy_voices(p) == 2

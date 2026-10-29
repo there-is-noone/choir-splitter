@@ -82,7 +82,7 @@ choir-split scan.pdf --check               # which bars of a PDF reading to chec
 ### MuseScore files
 
 `.mscz` / `.mscx` files are read by a built-in parser: parts and staves,
-voices 1–4, chords, ties, tuplets, tempo changes, time signatures, pickup bars,
+voices 1–4, chords, ties, tuplets, tempo marks, time signatures, pickup bars,
 repeats and voltas, D.C./D.S. al Fine/al Coda jumps (played the way MuseScore
 plays them), 8va/8vb lines, and the voice names of MuseScore's closed-score
 templates. Grace notes and ornaments are skipped.
@@ -207,11 +207,20 @@ this loses nothing.
   `S A`, `SA`, `Women`, `Soprano 1 2`, `Tenor I/II`, `S1 S2`.
 - Hymnal-style staves that write two parts as two-note chords are split into
   the upper and lower note, if the staff name tells which two parts it holds.
+- Before splitting, each staff's voices are compared: a second voice that just
+  repeats the first (PDF recognition sometimes writes a single line twice, and
+  files exported from such a reading keep the copy) becomes one track, so a
+  two-part song gets two tracks. A real divisi stays split, even when it sings
+  in unison most of the time. `--check` lists the staves merged this way.
 - Piano/organ/harp/guitar parts are treated as accompaniment. They get no
   track of their own but play softly in the practice and full mixes.
-- Ties are merged, grace notes skipped, repeats expanded, and tempo changes
-  followed. Every file has exactly the same length, so they line up in any
-  player or DAW.
+- Ties are merged, grace notes skipped and repeats expanded. Every file has
+  exactly the same length, so they line up in any player or DAW.
+- The tracks are a steady recording: dynamics (p, f, hairpins) are ignored and
+  every note is equally loud. The first tempo mark sets the tempo; after it only
+  a written number (♩ = 72) changes it. Tempo words such as "Poco Lento" or
+  "a tempo", rit./accel. and fermatas are left out. (MIDI files have no tempo
+  words, so all their tempo changes are followed.)
 
 ## Sound
 
