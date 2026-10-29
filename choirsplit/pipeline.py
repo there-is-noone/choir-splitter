@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import mixer, synth
 from .audio_io import write_audio
-from .check import check_score
+from .check import Issue, check_score
 from .loaders import load_score
 from .score import ScoreTracks, extract_tracks
 
@@ -131,6 +131,8 @@ def load_tracks(path: str | Path, opts: Options | None = None) -> ScoreTracks:
     opts.validate()
     path = Path(path)
     score = load_score(path, omr_dpi=opts.omr_dpi)
+    for n in score.recurse().notes:
+        n.lyrics = []  # the tracks don't use them, and the exported score shouldn't carry them
     if opts.export_musicxml is not None:
         export = Path(opts.export_musicxml)
         export.parent.mkdir(parents=True, exist_ok=True)
@@ -145,7 +147,8 @@ def load_tracks(path: str | Path, opts: Options | None = None) -> ScoreTracks:
         split_chords=opts.split_chords,
         include_accompaniment=opts.include_accompaniment,
     )
-    st.issues = issues
+    st.issues = issues + [Issue(None, name, "fixed", "its second voice only repeats the first: one track")
+                          for name in st.merged]
     st.recognised = hasattr(score, "omr_issues")
     if opts.title is not None:
         st.title = opts.title.strip()

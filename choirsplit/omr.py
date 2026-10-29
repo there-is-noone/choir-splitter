@@ -60,7 +60,7 @@ from music21 import clef, converter, instrument, layout, meter, note, stream, te
 
 from . import platforms
 from .check import Issue, voice_range
-from .score import is_accompaniment
+from .score import DUPLICATE_LINE_SHARE, NoteEvent, _differing_share, is_accompaniment
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 MUSICXML_SUFFIXES = {".mxl", ".musicxml", ".xml"}
@@ -1483,7 +1483,43 @@ def tidy_voices(part: stream.Part, log: list[int] | None = None) -> int:
     if simplify_voices(part):
         return 2 if _chordal(_measures(part)) else 1
     revoice_two_lines(part)
+    if _copied_line(part):
+        _keep_one_line(part)
+        return 1
     return 2
+
+
+def _voice_events(measures: list[stream.Measure], vid: str) -> list[NoteEvent]:
+    """The notes of voice `vid` as events on the part's quarter-note timeline."""
+    events = []
+    for m in measures:
+        base = float(m.offset)
+        for v_id, off, el in _note_elements(m):
+            if v_id == vid:
+                events += [NoteEvent(base + off, float(el.duration.quarterLength), p.ps) for p in el.pitches]
+    return events
+
+
+def _copied_line(part: stream.Part) -> bool:
+    """True if the two voices of a re-voiced staff are one line written twice: OMR put a single
+    line into two voices, which `revoice_two_lines` then copied into both."""
+    measures = _measures(part)
+    return _differing_share(_voice_events(measures, "1"), _voice_events(measures, "2")) < DUPLICATE_LINE_SHARE
+
+
+def _keep_one_line(part: stream.Part) -> None:
+    """Rebuild every measure from one of its two voices: voice 1, or voice 2 where 1 is empty."""
+    for m in _measures(part):
+        voices = {str(v.id): v for v in m.voices}
+        keep = voices.get("1")
+        if keep is None or not keep.notes:
+            keep = voices.get("2", keep)
+        base = float(keep.getOffsetBySite(m)) if keep is not None else 0.0
+        for v in list(m.voices):
+            m.remove(v)
+        if keep is not None:
+            for el in list(keep.notesAndRests):
+                m.insert(base + float(el.offset), el)
 
 
 def _median(values: list[float]) -> float:

@@ -6,7 +6,7 @@ import bisect
 import re
 from dataclasses import dataclass, field
 
-from music21 import chord, note, stream, tempo
+from music21 import chord, expressions, note, stream, tempo
 
 ACCOMPANIMENT_WORDS = (
     "piano", "pno", "organ", "org.", "keyboard", "kbd", "harp", "guitar",
@@ -57,6 +57,9 @@ ABBREVIATIONS = {
 GENERIC_VOICE_NAMES = {"", "voice", "voices", "vocal", "vocals", "choir", "chorus", "vocalist"}
 DEFAULT_VELOCITY = 80
 DEFAULT_BPM = 96  # used when the score has no tempo marking at all
+# Two lines of one staff that differ for less than this share of their sung time are one
+# line written twice (real divisi, even mostly in unison, differs for 20 % or more).
+DUPLICATE_LINE_SHARE = 0.05
 
 _NUMBER_RE = re.compile(r"\d+|I{1,3}|IV|V|VI{1,3}")
 
@@ -87,6 +90,7 @@ class ScoreTracks:
     duration: float  # seconds; every rendered track is padded to this length
     issues: list = field(default_factory=list)  # check.Issue: OMR repairs and suspect bars
     recognised: bool = False  # read from a PDF/image by optical music recognition
+    merged: list[str] = field(default_factory=list)  # staves whose second voice only copied the first
 
     @property
     def voices(self) -> list[Track]:
@@ -98,7 +102,12 @@ class ScoreTracks:
 
 
 class TempoMap:
-    """Converts quarter-length offsets into seconds, honouring tempo changes."""
+    """Converts quarter-length offsets into seconds at a steady tempo.
+
+    The first tempo mark sets the tempo. After it only a written number ("q = 72")
+    changes it: tempo words ("Poco Lento", "a tempo"), rit./accel. and playback-only
+    tempos are left out, so the tracks keep an even pace.
+    """
 
     def __init__(self, score: stream.Score, bpm: float | None = None, scale: float = 1.0):
         if scale <= 0:
@@ -114,6 +123,11 @@ class TempoMap:
             # Read the real tempo marks: metronomeMarkBoundaries() invents a 120 bpm mark
             # for a score without tempo (or before its first mark).
             flat = score.flatten()
+            # MuseScore writes "q = 120" as words plus <sound tempo="120"/>: music21 makes a
+            # number-less MetronomeMark and a TextExpression at the same offset.
+            written_at = {round(float(te.getOffsetBySite(flat)), 6)
+                          for te in flat.getElementsByClass(expressions.TextExpression)
+                          if re.search(r"=\s*\d", te.content or "")}
             marks = []
             for ti in flat.getElementsByClass(tempo.TempoIndication):
                 try:
@@ -122,11 +136,18 @@ class TempoMap:
                 except Exception:  # text-only tempo music21 can't put a number on
                     continue
                 if spq and spq > 0:
-                    explicit = isinstance(ti, tempo.MetronomeMark) and not ti.numberImplicit
-                    marks.append((float(ti.getOffsetBySite(flat)), explicit, spq))
+                    # A <sound tempo> without a printed mark has no number at all.
+                    start = float(ti.getOffsetBySite(flat))
+                    explicit = isinstance(ti, tempo.MetronomeMark) and (
+                        (ti.number is not None and not ti.numberImplicit) or round(start, 6) in written_at)
+                    marks.append((start, explicit, spq))
             # At one offset (marks repeated in every part, or "Allegro" + "q = 132"),
             # an explicit number beats a tempo word.
-            for start, _explicit, spq in sorted(marks, key=lambda m: (m[0], m[1])):
+            marks.sort(key=lambda m: (m[0], m[1]))
+            first = marks[0][0] if marks else 0.0
+            for start, explicit, spq in marks:
+                if start > first + 1e-9 and not explicit:
+                    continue
                 if self.starts and abs(self.starts[-1] - start) < 1e-9:
                     self.sec_per_q[-1] = spq
                 else:
@@ -238,13 +259,6 @@ def _element_pitches(el, chord_mode: str) -> list[tuple[float, object]]:
     return []  # unpitched / percussion
 
 
-def _velocity(el) -> int:
-    vol = getattr(el, "volume", None)
-    if vol is not None and vol.velocity is not None:
-        return int(vol.velocity)
-    return DEFAULT_VELOCITY
-
-
 def _events_from_elements(items, tempo_map: TempoMap, chord_mode: str) -> list[NoteEvent]:
     """Build note events, merging tied notes so they don't re-attack."""
     items = sorted(items, key=lambda x: x[0])
@@ -267,7 +281,7 @@ def _events_from_elements(items, tempo_map: TempoMap, chord_mode: str) -> list[N
                 else:
                     del open_ties[midi]
                 continue
-            ev = NoteEvent(start_s, end_s - start_s, midi, _velocity(el))
+            ev = NoteEvent(start_s, end_s - start_s, midi)  # dynamics ignored: every note equally loud
             events.append(ev)
             if tie_type in ("start", "continue"):
                 open_ties[midi] = (ev, off + ql)
@@ -388,6 +402,34 @@ def _only_overlap_voices(voices: dict[str, list]) -> bool:
     return rest < 0.05 * sizes[0] or (rest < 0.25 * sizes[0] and _has_chordal_voice(main))
 
 
+def _differing_share(a: list[NoteEvent], b: list[NoteEvent]) -> float:
+    """Share of the time either line sounds during which the two sound different pitches."""
+    bounds = sorted({t for n in a + b for t in (n.start, n.start + n.duration)})
+
+    def pitches(line, t):
+        return {n.pitch for n in line if n.start <= t < n.start + n.duration}
+
+    sounding = differing = 0.0
+    for lo, hi in zip(bounds, bounds[1:]):
+        mid = (lo + hi) / 2
+        pa, pb = pitches(a, mid), pitches(b, mid)
+        if pa or pb:
+            sounding += hi - lo
+            differing += (hi - lo) * (pa != pb)
+    return differing / sounding if sounding > 0 else 0.0
+
+
+def _distinct_lines(lines: list[list[NoteEvent]]) -> list[int]:
+    """Indices of the lines that are really lines of their own. A line that sounds the same as
+    an earlier one nearly all the time is a copy (OMR writes a single line into two voices,
+    and files exported from such a reading keep the copy), not a divisi."""
+    kept: list[int] = []
+    for i, line in enumerate(lines):
+        if not any(_differing_share(line, lines[k]) < DUPLICATE_LINE_SHARE for k in kept):
+            kept.append(i)
+    return kept
+
+
 def _outer_line(events: list[NoteEvent], top: bool) -> list[NoteEvent]:
     """Keep the highest (top) or lowest line: one note per onset, and no inner note that
     starts while the outer note is still held."""
@@ -441,6 +483,7 @@ def extract_tracks(
         return el.getOffsetInHierarchy(part)
 
     tracks: list[Track] = []
+    merged: list[str] = []
     groups = _group_staves(score)
     acc_flags = [is_accompaniment(g[0]) for g in groups]
     if acc_flags and all(acc_flags):
@@ -474,13 +517,20 @@ def extract_tracks(
                 voices = {"1": [x for v in voices.values() for x in v]}
             if split_voices and len(voices) > 1:
                 ids = sorted(voices, key=lambda k: int(k) if k.isdigit() else 99)
-                names = _split_names(staff_name, len(ids))
                 if split_chords:
                     _lend_chord_bottoms(voices[ids[0]], voices[ids[-1]])
-                for vid, vname in zip(ids, names):
-                    # In a voice shared with others, keep the line's outer note of any chord.
-                    mode = "top" if vid == ids[0] else ("bottom" if vid == ids[-1] else "all")
-                    tracks.append(Track(vname, "voice", _events_from_elements(voices[vid], tempo_map, mode)))
+                # In a voice shared with others, keep the line's outer note of any chord.
+                lines = [_events_from_elements(voices[vid], tempo_map,
+                                               "top" if vid == ids[0] else ("bottom" if vid == ids[-1] else "all"))
+                         for vid in ids]
+                kept = _distinct_lines(lines)
+                if len(kept) < len(lines):
+                    merged.append(staff_name)
+                if len(kept) == 1:
+                    tracks.append(Track(staff_name, "voice", lines[kept[0]]))
+                else:
+                    for i, vname in zip(kept, _split_names(staff_name, len(kept))):
+                        tracks.append(Track(vname, "voice", lines[i]))
             else:
                 items = [x for v in voices.values() for x in v]
                 pair = _split_names(staff_name, 2)
@@ -495,8 +545,13 @@ def extract_tracks(
                     # Hymnal style: two parts written as chords in a single voice
                     # (or a TTBB "Tenor" staff with Tenor 1 + 2 as chords).
                     events = _events_from_elements(items, tempo_map, "all")
-                    tracks.append(Track(pair[0], "voice", _outer_line(events, top=True)))
-                    tracks.append(Track(pair[1], "voice", _outer_line(events, top=False)))
+                    top, bottom = _outer_line(events, top=True), _outer_line(events, top=False)
+                    if len(_distinct_lines([top, bottom])) == 1:
+                        merged.append(staff_name)
+                        tracks.append(Track(staff_name, "voice", top))
+                    else:
+                        tracks.append(Track(pair[0], "voice", top))
+                        tracks.append(Track(pair[1], "voice", bottom))
                 else:
                     tracks.append(Track(staff_name, "voice", _events_from_elements(items, tempo_map, "all")))
         if group_index in hymn_names and len(tracks) - tracks_before == 1:
@@ -510,7 +565,7 @@ def extract_tracks(
         md = score.metadata
         candidates = [md.title, md.movementName] if md is not None else []
         title = next((c for c in candidates if _meaningful_title(c)), None)
-    return ScoreTracks(title or "Score", tracks, duration)
+    return ScoreTracks(title or "Score", tracks, duration, merged=merged)
 
 
 def _hymn_staff_names(groups, acc_flags) -> dict[int, str]:

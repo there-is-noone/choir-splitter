@@ -158,8 +158,29 @@ def test_export_musicxml_round_trips(short_alto, tmp_path, capsys):
     again = load_tracks(out)
     assert [(t.name, t.kind) for t in again.tracks] == [(t.name, t.kind) for t in first.tracks]
     for a, b in zip(first.tracks, again.tracks):
-        assert [(n.start, n.duration, n.pitch) for n in a.notes] == pytest.approx(
-            [(n.start, n.duration, n.pitch) for n in b.notes])
+        assert len(a.notes) == len(b.notes)
+        for x, y in zip(a.notes, b.notes):  # pytest.approx takes no nested sequences
+            assert (x.start, x.duration, x.pitch) == pytest.approx((y.start, y.duration, y.pitch))
+
+
+def test_export_musicxml_goes_beside_the_tracks(short_alto, tmp_path, capsys):
+    tracks = tmp_path / "tracks"
+    assert main([str(short_alto), "--list", "-o", str(tracks), "--export-musicxml", "fixed.musicxml"]) == 0
+    assert (tracks / "fixed.musicxml").is_file()
+    assert main([str(short_alto), "--list", "--export-musicxml"]) == 0  # default name and directory
+    default = short_alto.with_name("short_alto_tracks") / "short_alto.musicxml"
+    assert default.is_file() and f"saved {default}" in capsys.readouterr().out
+
+
+def test_exported_musicxml_has_no_lyrics(tmp_path):
+    part = build_part("Soprano", ["C5 D5 E5 F5"])
+    for n, word in zip(part.recurse().notes, ["Jauch", "zet", "dem", "Herrn"]):
+        n.addLyric(word)
+    path = write_score(build_score(part, bpm=60), tmp_path, "sung")
+    assert "<lyric" in path.read_text(encoding="utf-8")
+    out = tmp_path / "export.musicxml"
+    load_tracks(path, Options(export_musicxml=out))
+    assert "<lyric" not in out.read_text(encoding="utf-8")
 
 
 def test_loaded_tracks_carry_the_issues(short_alto):
