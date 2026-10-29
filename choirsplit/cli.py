@@ -42,7 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--check", action="store_true",
                    help="list bars that look wrong (and what PDF recognition repaired) and exit")
     p.add_argument("--export-musicxml", type=Path, nargs="?", const=Path(), metavar="FILE",
-                   help="also save the score as MusicXML, e.g. to correct a PDF reading in MuseScore; "
+                   help="also save the score (without lyrics) as MusicXML, e.g. to correct a PDF reading "
+                        "in MuseScore; "
                         "a bare file name (default: <score name>.musicxml) goes in the output directory")
     p.add_argument("--omr-dpi", type=int, metavar="N",
                    help="resolution to read PDFs at (default: Audiveris's 300)")

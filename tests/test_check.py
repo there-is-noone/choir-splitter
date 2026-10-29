@@ -172,6 +172,17 @@ def test_export_musicxml_goes_beside_the_tracks(short_alto, tmp_path, capsys):
     assert default.is_file() and f"saved {default}" in capsys.readouterr().out
 
 
+def test_exported_musicxml_has_no_lyrics(tmp_path):
+    part = build_part("Soprano", ["C5 D5 E5 F5"])
+    for n, word in zip(part.recurse().notes, ["Jauch", "zet", "dem", "Herrn"]):
+        n.addLyric(word)
+    path = write_score(build_score(part, bpm=60), tmp_path, "sung")
+    assert "<lyric" in path.read_text(encoding="utf-8")
+    out = tmp_path / "export.musicxml"
+    load_tracks(path, Options(export_musicxml=out))
+    assert "<lyric" not in out.read_text(encoding="utf-8")
+
+
 def test_loaded_tracks_carry_the_issues(short_alto):
     st = load_tracks(short_alto)
     assert not st.recognised

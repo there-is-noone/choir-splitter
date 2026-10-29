@@ -131,6 +131,8 @@ def load_tracks(path: str | Path, opts: Options | None = None) -> ScoreTracks:
     opts.validate()
     path = Path(path)
     score = load_score(path, omr_dpi=opts.omr_dpi)
+    for n in score.recurse().notes:
+        n.lyrics = []  # the tracks don't use them, and the exported score shouldn't carry them
     if opts.export_musicxml is not None:
         export = Path(opts.export_musicxml)
         export.parent.mkdir(parents=True, exist_ok=True)
