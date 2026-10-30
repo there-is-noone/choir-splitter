@@ -10,7 +10,7 @@ from pathlib import Path
 from . import mixer, synth
 from .audio_io import write_audio
 from .check import Issue, check_score
-from .loaders import load_score
+from .loaders import OMR_SUFFIXES, load_score
 from .score import ScoreTracks, extract_tracks
 
 MAX_TRANSPOSE = 48  # semitones either way
@@ -138,7 +138,10 @@ def load_tracks(path: str | Path, opts: Options | None = None) -> ScoreTracks:
         export.parent.mkdir(parents=True, exist_ok=True)
         score.write("musicxml", fp=str(export))
     # Repairs OMR made, then the bars that still look wrong (for any input).
-    issues = list(getattr(score, "omr_issues", [])) + check_score(score, getattr(score, "omr_locations", None))
+    suffix = path.suffix.lower()
+    source = "scan" if suffix in OMR_SUFFIXES else "midi" if suffix in (".mid", ".midi") else "notation"
+    issues = list(getattr(score, "omr_issues", [])) + check_score(
+        score, getattr(score, "omr_locations", None), source)
     st = extract_tracks(
         score,
         bpm=opts.bpm,

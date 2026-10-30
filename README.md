@@ -171,7 +171,11 @@ Bars are flagged when:
 - **Big leap:** a jump is much larger than the voice makes anywhere else.
 - **Out of step:** the voice's rhythm breaks away from the others in a passage where they all move together.
 
-A normal run prints a one-line reminder when the recognised score has such bars.
+A normal run prints a one-line reminder when the score has such bars.
+
+`--check` works on every file type, not only PDFs: in a MusicXML, MuseScore or MIDI file
+it finds typing mistakes the same way (wrong octave, missing rest, wrong length). MIDI has
+no written rests, so lines that stop before the end of a bar aren't reported there.
 
 To fix them for good, save the cleaned score, correct it in MuseScore (free), and make
 the tracks from the corrected file. That file loads without OMR from then on:

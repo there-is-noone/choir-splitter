@@ -1,8 +1,9 @@
-"""Find bars where a recognised score is probably wrong, so they can be checked by hand.
+"""Find bars where a score is probably wrong, so they can be checked by hand.
 
-Optical music recognition misses dots and rests, reads stray marks as notes and gets
-pitches wrong. ``omr.assemble`` repairs what it safely can and logs each repair as a
-``fixed`` Issue; ``check_score`` looks at the result and reports ``suspect`` bars:
+It runs on every input; a score read from a PDF needs it most. Optical music
+recognition misses dots and rests, reads stray marks as notes and gets pitches wrong.
+``omr.assemble`` repairs what it safely can and logs each repair as a ``fixed`` Issue;
+``check_score`` looks at the result and reports ``suspect`` bars:
 
 * a sung line that runs out before the end of its bar (missed dot or rest: the notes
   after it come in early);
@@ -12,7 +13,8 @@ pitches wrong. ``omr.assemble`` repairs what it safely can and logs each repair 
   together (a misread note length).
 
 Pitches themselves can't be verified, so a misread pitch only shows up when it makes
-an implausible leap or range.
+an implausible leap or range. MIDI has no written rests, so a line that stops before the
+end of its bar is normal there and isn't reported.
 """
 
 from __future__ import annotations
@@ -101,10 +103,21 @@ def _sung_parts(score: stream.Score) -> list[stream.Part]:
     return parts if parts and all(acc) else [p for p, a in zip(parts, acc) if not a]
 
 
-def check_score(score: stream.Score, locations: dict[int, tuple[int, int]] | None = None) -> list[Issue]:
+# The likely cause given with each kind of suspect bar, by where the score came from.
+HINTS = {
+    "scan": {"short": "missed dot or rest?", "leap": "misread pitch?", "rhythm": "misread length?"},
+    "notation": {"short": "missing rest or wrong length?", "leap": "wrong octave?", "rhythm": "wrong length?"},
+}
+HINTS["midi"] = HINTS["notation"]
+
+
+def check_score(score: stream.Score, locations: dict[int, tuple[int, int]] | None = None,
+                source: str = "scan") -> list[Issue]:
     """Suspect bars of `score`, in bar order. `locations` maps a measure number to its
-    (page, system) in the original, for reports."""
+    (page, system) in the original, for reports. `source` is where the score came from:
+    "scan" (PDF or image), "notation" (MusicXML, MuseScore...) or "midi"."""
     locations = locations or {}
+    hint = HINTS[source]
     issues: list[Issue] = []
 
     def add(bar, voice, detail):
@@ -149,8 +162,8 @@ def check_score(score: stream.Score, locations: dict[int, tuple[int, int]] | Non
                         contiguous = False
                         break
                     pos = o + float(e.duration.quarterLength)
-                if contiguous and pos < end - _EPS:
-                    add(m.number, name, f"notes fill {pos:g} of {end:g} beats (missed dot or rest?)")
+                if contiguous and pos < end - _EPS and source != "midi":
+                    add(m.number, name, f"notes fill {pos:g} of {end:g} beats ({hint['short']})")
                 if n_lines == 1 and len(lines) == 1:
                     rhythms[bar_pos][k] = tuple(round(o, 4) for o, _ in notes)
             for _, e in (oe for line in lines for oe in line if not oe[1].isRest):
@@ -166,7 +179,7 @@ def check_score(score: stream.Score, locations: dict[int, tuple[int, int]] | Non
         big = [(bar, d) for bar, d in leaps if d > limit]
         if big and len(big) <= max(2, RARE_LEAPS * len(leaps)):
             for bar, d in big:
-                add(bar, name, f"leap of {d:g} semitones (misread pitch?)")
+                add(bar, name, f"leap of {d:g} semitones ({hint['leap']})")
 
     # Out of step: every other single-line voice has the same rhythm in this bar and this
     # one has as many notes but different onsets, while it moves with them in the bars on
@@ -190,7 +203,7 @@ def check_score(score: stream.Score, locations: dict[int, tuple[int, int]] | Non
             if (common is not None and onsets != common and len(onsets) == len(common) > 1
                     and in_step(i - 1, k) and in_step(i + 1, k)):
                 add(numbers[bar_pos], per_part[k][0].partName or "Voice",
-                    "rhythm differs from the other voices (misread length?)")
+                    f"rhythm differs from the other voices ({hint['rhythm']})")
 
     issues = list(dict.fromkeys(issues))
     issues.sort(key=lambda i: (i.bar if i.bar is not None else -1, i.voice))

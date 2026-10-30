@@ -91,9 +91,11 @@ def main(argv: list[str] | None = None) -> int:
     for path in written:
         print(f"  wrote {path}")
     suspects = {i.bar for i in st.issues if i.kind == "suspect"}
-    if st.recognised and suspects:
-        print(f"choir-split: {len(suspects)} bar{'s' if len(suspects) > 1 else ''} of the recognised score "
-              "may be misread; run again with --check to list them", file=sys.stderr)
+    if suspects:
+        what = ("of the recognised score may be misread" if st.recognised
+                else f"of the score look{'s' if len(suspects) == 1 else ''} wrong")
+        print(f"choir-split: {len(suspects)} bar{'s' if len(suspects) > 1 else ''} {what}; "
+              "run again with --check to list them", file=sys.stderr)
     return 0
 
 
@@ -114,6 +116,8 @@ def print_check(st) -> None:
     if suspects and st.recognised:
         print("To correct them: run with --export-musicxml, fix the bars in MuseScore, "
               "then run choir-split on the saved file.")
+    elif suspects:
+        print("If they are mistakes: fix the bars in MuseScore, save, and run choir-split on the saved file.")
 
 
 if __name__ == "__main__":
