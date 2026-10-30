@@ -484,6 +484,70 @@ def test_fitting_dpi():
     assert omr.fitting_dpi(smaller + "\n" + TOO_LARGE, None) == 127  # the largest page decides
 
 
+NO_STAVES = ("WARN  [notes#{n}]  Book 2044 | Error processing stub "
+             "org.audiveris.omr.step.StepException: No regularly spaced lines found")
+
+
+def fake_audiveris_with_notes_pages(clean_env, xml: Path, staffless: list[int]) -> Path:
+    """A fake Audiveris that, like the real one, fails the whole export when a page has
+    no staves (an arranger's notes page), unless -sheets leaves those pages out."""
+    log = clean_env / "calls.jsonl"
+    make_exe(clean_env / "empty-bin" / "Audiveris", f"""
+        import json, os, shutil, sys
+        args = sys.argv[1:]
+        with open({str(log)!r}, "a") as fh:
+            fh.write(json.dumps(args) + "\\n")
+        if "-sheets" not in args:
+            for n in {staffless!r}:
+                print({NO_STAVES!r}.format(n=n))
+            print("Estimating resolution as 333", file=sys.stderr)
+            print("java.lang.Exception: Error in export")
+            sys.exit(1)
+        shutil.copy({str(xml)!r}, os.path.join(args[args.index("-output") + 1], "score.musicxml"))
+    """)
+    return log
+
+
+def test_pages_without_staves_are_left_out(clean_env, monkeypatch, satb_xml, capsys):
+    log = fake_audiveris_with_notes_pages(clean_env, satb_xml, [1, 4])
+    monkeypatch.setenv("CHOIRSPLIT_OMR_CACHE", str(clean_env / "cache"))
+    monkeypatch.setattr(omr, "pdf_page_count", lambda path: 5)
+    pdf = clean_env / "notes.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    score = load_score(pdf)
+    assert [p.partName for p in score.parts] == ["Soprano", "Alto", "Tenor", "Bass"]
+    calls = [json.loads(x) for x in log.read_text().splitlines()]
+    assert len(calls) == 2 and "-sheets" not in calls[0]
+    sheets = calls[1][calls[1].index("-sheets") + 1:calls[1].index("-output")]
+    assert sheets == ["2-3", "5"]
+    assert "no staves found on pages 1, 4; reading the other pages" in capsys.readouterr().err
+
+
+def test_a_pdf_with_no_staves_at_all_reports_the_audiveris_error(clean_env, monkeypatch, satb_xml):
+    fake_audiveris_with_notes_pages(clean_env, satb_xml, [1, 2])
+    monkeypatch.setattr(omr, "pdf_page_count", lambda path: 2)
+    pdf = clean_env / "text.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    with pytest.raises(ScoreLoadError) as err:
+        load_score(pdf)
+    # The engine's own error, not the Tesseract noise printed after it, ends the message.
+    assert "No regularly spaced lines found" in str(err.value)
+    assert "Estimating resolution" not in str(err.value)
+
+
+def test_sheet_ranges():
+    assert omr._sheet_ranges([1, 2, 3, 5, 7, 8]) == ["1-3", "5", "7-8"]
+    assert omr._sheet_ranges([4]) == ["4"]
+
+
+def test_tail_drops_ocr_noise_and_stack_frames():
+    output = ("WARN  [x]  CLI 956  | Exception occurred java.lang.Exception: Error in export\n"
+              "\tat org.audiveris.omr.CLI.run(CLI.java:956)\n\t... 3 more\n"
+              + "Estimating resolution as 350\n" * 20)
+    assert omr._tail(output).strip() == ("WARN  [x]  CLI 956  | Exception occurred "
+                                         "java.lang.Exception: Error in export")
+
+
 @pytest.mark.parametrize("value", ["abc", "50", "5000"])
 def test_bad_omr_dpi_environment_variable(monkeypatch, value):
     monkeypatch.setenv("CHOIRSPLIT_OMR_DPI", value)

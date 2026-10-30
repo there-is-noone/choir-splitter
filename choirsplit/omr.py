@@ -91,7 +91,13 @@ AUDIVERIS_DEFAULT_DPI = 300
 # Audiveris drops every page with more pixels than its limit (20 million): a poster-sized
 # PDF page at 300 dpi. Such PDFs are read again at a resolution that fits.
 TOO_LARGE_IMAGE = re.compile(r"Too large image: ([\d,.]+) pixels \(vs ([\d,.]+) max\)")
+# A page with no staves (a title, notes or lyrics page) fails, and with it the whole export.
+# Such PDFs are read again without those pages.
+NO_STAVES = re.compile(r"#(\d+)\]\s.*No regularly spaced lines found")
 _EPS = 1e-6
+# Lines that bury Audiveris's own error in its output: Tesseract prints one "Estimating
+# resolution" per text block, and Java stack frames push out the exception message.
+_NOISE = re.compile(r"^\s*(Estimating resolution as \d+|at [\w$.<>/]+\(.*\)|\.\.\. \d+ more)\s*$")
 
 
 def _error(msg: str) -> Exception:
@@ -273,7 +279,8 @@ def collect_outputs(outdir: Path) -> list[Path]:
 
 
 def _tail(text_: str, lines: int = 15) -> str:
-    keep = [ln for ln in text_.strip().splitlines() if ln.strip()][-lines:]
+    keep = [ln for ln in text_.strip().splitlines()
+            if ln.strip() and not _NOISE.match(ln)][-lines:]
     return "\n".join("    " + ln for ln in keep)
 
 
@@ -287,7 +294,8 @@ def _run(argv: list[str], timeout: float, env: dict[str, str], what: str) -> Non
                      "(set CHOIRSPLIT_OMR_TIMEOUT to allow more time)") from None
     except OSError as exc:
         raise _error(f"could not run {what} ({argv[0]}): {exc}") from exc
-    _run.last_output = proc.stdout + proc.stderr  # for error messages and retries
+    # stdout last: it carries Audiveris's errors, which the tail of the output must keep.
+    _run.last_output = proc.stderr + proc.stdout  # for error messages and retries
     if proc.returncode != 0:
         raise _error(f"{what} failed with exit code {proc.returncode}:\n{_tail(_run.last_output)}")
 
@@ -309,12 +317,18 @@ def fitting_dpi(output: str, dpi: int | None) -> int | None:
 def _run_audiveris(engine: Engine, path: Path, outdir: Path, timeout: float,
                    dpi: int | None) -> int | None:
     """Run Audiveris on `path`; returns the resolution the PDF was read at (None: its
-    default). Pages too large for Audiveris are read again once at a resolution that fits."""
+    default). Pages too large for Audiveris are read again once at a resolution that fits,
+    and a PDF with pages that have no staves (notes, lyrics) again without those pages."""
     from .loaders import ScoreLoadError
 
     is_pdf = path.suffix.lower() == ".pdf"
-    for attempt in range(2):
+    skipped: set[int] = set()
+    pages = 0  # the PDF's page count, once pages are skipped
+    resized = False
+    while True:
         options = ["-constant", f"{AUDIVERIS_PDF_RESOLUTION}={dpi}"] if dpi is not None and is_pdf else []
+        if skipped:
+            options += ["-sheets", *_sheet_ranges(sorted(set(range(1, pages + 1)) - skipped))]
         argv = [*engine.argv, "-batch", "-export", *options, "-output", str(outdir), "--", str(path)]
         try:
             _run(argv, timeout, engine.env, "Audiveris")
@@ -323,19 +337,39 @@ def _run_audiveris(engine: Engine, path: Path, outdir: Path, timeout: float,
             failure = exc
         smaller = fitting_dpi(_run.last_output, dpi)
         if smaller is None:
-            if failure is not None:
+            if failure is None:
+                return dpi
+            staffless = {int(n) for n in NO_STAVES.findall(_run.last_output)} - skipped
+            if is_pdf and staffless and not pages:
+                pages = pdf_page_count(path) or 0
+            if not staffless or not set(range(1, pages + 1)) - skipped - staffless:
                 raise failure
-            return dpi
-        if not is_pdf or attempt or smaller < 50:
+            skipped |= staffless
+            print(f"choirsplit: {path.name}: no staves found on page{'s' if len(skipped) > 1 else ''} "
+                  f"{', '.join(map(str, sorted(skipped)))}; reading the other pages", file=sys.stderr)
+            shutil.rmtree(outdir, ignore_errors=True)
+            outdir.mkdir(parents=True)
+            continue
+        if not is_pdf or resized or smaller < 50:
             m = TOO_LARGE_IMAGE.search(_run.last_output)
             raise _error(f"{path.name} is too large for Audiveris ({m.group(1)} pixels, at most "
                          f"{m.group(2)}); scale it down and try again")
         print(f"choirsplit: the pages of {path.name} are too large for Audiveris at "
               f"{dpi or AUDIVERIS_DEFAULT_DPI} dpi; reading them at {smaller} dpi", file=sys.stderr)
-        dpi = smaller
+        dpi, resized = smaller, True
         shutil.rmtree(outdir, ignore_errors=True)
         outdir.mkdir(parents=True)
-    return dpi
+
+
+def _sheet_ranges(numbers: list[int]) -> list[str]:
+    """Audiveris's -sheets arguments for sorted page `numbers`: [1, 2, 3, 5] -> ["1-3", "5"]."""
+    runs: list[list[int]] = []
+    for n in numbers:
+        if runs and n == runs[-1][1] + 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    return [f"{a}-{b}" if b > a else str(a) for a, b in runs]
 
 
 def run_engine(engine: Engine, path: Path, outdir: Path, timeout: float | None = None,
