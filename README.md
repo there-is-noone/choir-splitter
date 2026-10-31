@@ -36,6 +36,24 @@ python3 -m venv .venv                 # Windows: py -m venv .venv
 .venv/bin/pip install .               # Windows: .venv\Scripts\python -m pip install .
 ```
 
+## Desktop app
+
+For singers who'd rather not use a terminal there is a window: drop or choose a score,
+set the options with switches and sliders, and press **Make tracks**. It does everything
+the command does: solo/practice tracks, speed, key, voices, MusicXML export, and **Check
+score**. A PDF is read once per session even if you check it and make tracks from it.
+
+```bash
+pipx install ".[gui]"                 # the [gui] extra adds the modern theme and drag and drop
+choir-split-ui                        # or: choir-split-ui "Ave Verum.pdf"
+choir-split-ui --install-shortcut     # add it to the Start menu / Applications / app menu
+```
+
+It runs on Windows, macOS and Linux and follows the system's light or dark mode. A long
+PDF reading shows the page it is on and can be cancelled. On Linux with Tk 9 the window
+can't accept dragged files: tkdnd crashes there, so the score is chosen with **Choose
+file…** instead. [INSTALL.md](INSTALL.md#the-desktop-app) has the details for each system.
+
 ## Usage
 
 ```bash

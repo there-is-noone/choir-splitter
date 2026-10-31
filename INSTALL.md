@@ -216,6 +216,51 @@ choirsplit finds `mscore`, `musescore`, `MuseScore4`, `mscore4portable` and simi
 
 ---
 
+## The desktop app
+
+Install choirsplit with the `gui` extra, the same way as above but with `[gui]` after the
+folder (the quotes matter in zsh and PowerShell):
+
+```bash
+pipx install "path/to/projekty/choir_splitter[gui]"
+```
+
+In a virtual environment: `pip install ".[gui]"`. If choirsplit is already installed
+with pipx, add the extra with `pipx install --force "path/to/projekty/choir_splitter[gui]"`.
+
+Start it with `choir-split-ui`. To start it like any other program, add a shortcut once:
+
+```bash
+choir-split-ui --install-shortcut
+```
+
+| | Shortcut |
+| --- | --- |
+| Windows | **Choir Split** in the Start menu (runs without a console window) |
+| macOS | `~/Applications/Choir Split.app`; drag it to the Dock if you like |
+| Linux | **Choir Split** in the desktop's app menu (`~/.local/share/applications/choirsplit.desktop`) |
+
+On macOS and Linux the shortcut remembers the PATH and `CHOIRSPLIT_*` settings of the
+terminal you ran it from: programs started from the Dock or app menu don't read
+`~/.zshrc` or `~/.bashrc`. Run it again after changing those settings.
+
+**The window needs Tk** (Python's `tkinter`). The python.org installers for Windows and
+macOS include it. Elsewhere:
+- **Fedora:** `sudo dnf install python3-tkinter`
+- **Ubuntu / Debian:** `sudo apt install python3-tk`
+- **Arch:** `sudo pacman -S tk`
+- **Homebrew Python:** `brew install python-tk@3.13` (your Python's version)
+- **Windows, if it's missing:** run the Python installer again → Modify → tick **tcl/tk and IDLE**
+
+`choir-split-ui` says which of these applies if Tk is missing.
+
+Without the `gui` extra the window still works, with the system's plain theme and
+without dragging files in. Dragging files in is also off on Linux with Tk 9, where the
+drag-and-drop library crashes; choose the score with **Choose file…** there.
+`CHOIRSPLIT_DND=1` forces it on (at your own risk) and `CHOIRSPLIT_DND=0` turns it off.
+
+On macOS the menu bar shows "Python" rather than "Choir Split".
+
 ## Installing straight from GitHub
 
 If the repository is public, or you are signed in to git with access to it, pipx can
@@ -235,6 +280,7 @@ This installs what is on the `main` branch.
 | --- | --- | --- | --- |
 | Data (user-local Audiveris, OCR data) | `%LOCALAPPDATA%\choirsplit` | `~/Library/Application Support/choirsplit` | `~/.local/share/choirsplit` |
 | Cache of PDF recognition results | `%LOCALAPPDATA%\choirsplit\Cache\omr` | `~/Library/Caches/choirsplit/omr` | `~/.cache/choirsplit/omr` |
+| Desktop app settings (`gui.json`) and error log (`gui.log`) | the data folder | the data folder | the data folder |
 
 `CHOIRSPLIT_HOME` moves the data folder, and `CHOIRSPLIT_OMR_CACHE` moves the cache
 (`0` turns it off). Deleting the cache is always safe.
@@ -248,6 +294,7 @@ This installs what is on the `main` branch.
 | `CHOIRSPLIT_HOME` | choirsplit's data folder |
 | `CHOIRSPLIT_OMR_CACHE` | PDF recognition cache folder, or `0` for no cache |
 | `CHOIRSPLIT_OMR_TIMEOUT` | seconds before PDF recognition is stopped |
+| `CHOIRSPLIT_DND` | `1` or `0`: dragging files onto the desktop app on or off |
 
 To set one permanently:
 - **Windows:** `setx NAME "value"`, then open a new terminal.
@@ -266,3 +313,10 @@ To set one permanently:
 - **"ffmpeg was not found":** reinstall with `pip install --force-reinstall imageio-ffmpeg`
   (inside your venv), or write WAV files instead with `--format wav`.
 - **Wrong or missing voices:** run with `--list` to see what was detected.
+- **The desktop app says "needs Tk":** install your system's Tk package for Python (see
+  [The desktop app](#the-desktop-app)).
+- **The desktop app found no Audiveris, though the command does:** you probably set
+  `CHOIRSPLIT_AUDIVERIS` in `~/.zshrc` or `~/.bashrc`. Run `choir-split-ui
+  --install-shortcut` again from a terminal, and start the app from that shortcut.
+- **"Something went wrong" in the desktop app:** the details are in `gui.log` in the
+  data folder (see the table above).

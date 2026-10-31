@@ -5,6 +5,7 @@ one per run, so code deep in the loaders can report and stop without passing it 
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import os
 import signal
 import subprocess
@@ -96,7 +97,8 @@ def run_process(argv: list[str], timeout: float | None = None, env: dict[str, st
                 on_line(line)
         stream.close()
 
-    readers = [threading.Thread(target=pump, args=(s, sink), daemon=True)
+    # In the caller's context, so `on_line` can report to the job (threads start without it).
+    readers = [threading.Thread(target=contextvars.copy_context().run, args=(pump, s, sink), daemon=True)
                for s, sink in ((proc.stdout, out), (proc.stderr, err))]
     for r in readers:
         r.start()

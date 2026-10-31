@@ -122,13 +122,19 @@ def _alive(pid: int) -> bool:
 @pytest.mark.skipif(sys.platform == "win32", reason="checks POSIX process groups")
 def test_cancelling_stops_the_program_and_its_children(tmp_path):
     argv, pidfile = _sleeper(tmp_path)
-    job, lines = jobs.Job(), []
+    stages = []
+    job, lines = jobs.Job(progress=stages.append), []
+
+    def on_line(line):  # runs on a reader thread, yet still reports to this job
+        lines.append(line)
+        jobs.progress(f"saw {line.strip()}")
+
     threading.Timer(1.5, job.cancel.set).start()
     started = time.monotonic()
     with jobs.running(job), pytest.raises(jobs.Cancelled):
-        jobs.run_process(argv, on_line=lines.append)
+        jobs.run_process(argv, on_line=on_line)
     assert time.monotonic() - started < 10
-    assert lines == ["[pn#3] started\n"]
+    assert lines == ["[pn#3] started\n"] and stages == ["saw [pn#3] started"]
     child = int(pidfile.read_text())
     deadline = time.monotonic() + 5
     while _alive(child) and time.monotonic() < deadline:
