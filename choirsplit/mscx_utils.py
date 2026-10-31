@@ -228,6 +228,7 @@ def find_musescore_cli() -> list[str] | None:
                 capture_output=True,
                 timeout=10,
                 check=False,
+                **platforms.no_console(),
             )
         except Exception:
             return None

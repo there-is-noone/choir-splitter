@@ -7,14 +7,23 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import mixer, synth
+from music21.exceptions21 import Music21Exception
+
+from . import jobs, mixer, synth
 from .audio_io import write_audio
 from .check import Issue, check_score
-from .loaders import OMR_SUFFIXES, load_score
+from .loaders import OMR_SUFFIXES, ScoreLoadError, load_score
 from .score import ScoreTracks, extract_tracks
 
 MAX_TRANSPOSE = 48  # semitones either way
 MIN_DPI, MAX_DPI = 100, 1200  # --omr-dpi limits
+# Tempo limits: far beyond them a track is either silence-length nonsense or so long its
+# audio no longer fits in memory (0.05x speed on a 4-minute, 8-voice piece needs ~7 GB).
+MIN_SCALE, MAX_SCALE = 0.25, 4.0
+MIN_BPM, MAX_BPM = 10.0, 400.0
+BITRATE = re.compile(r"(\d{2,3})k")
+MIN_KBPS, MAX_KBPS = 32, 320
+MIN_DURATION = 0.1  # seconds; a shorter score is a broken tempo, not music
 # Device names Windows refuses as file names, with or without an extension.
 _WINDOWS_RESERVED = re.compile(r"(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])")
 
@@ -38,18 +47,34 @@ class Options:
     export_musicxml: Path | None = None  # also write the (cleaned) score here as MusicXML
     omr_dpi: int | None = None  # resolution PDFs are read at by OMR (default: the engine's)
 
+    def load_key(self) -> tuple:
+        """The settings load_tracks uses; the tracks it returns are only valid for them."""
+        return (self.bpm, self.tempo_scale, self.split_voices, self.split_chords,
+                self.include_accompaniment, self.title, self.omr_dpi)
+
     def validate(self) -> None:
         """Raise ValueError for a setting that can't work, before any slow loading starts."""
         if self.mode not in ("solo", "practice", "both"):
             raise ValueError(f"unknown mode {self.mode!r}")
         if self.fmt not in ("mp3", "wav"):
             raise ValueError(f"unsupported output format: {self.fmt}")
-        if not 0.0 <= self.others_gain <= 1.0:  # also rejects NaN
+        if isinstance(self.others_gain, bool) or not 0.0 <= self.others_gain <= 1.0:  # also NaN
             raise ValueError(f"others volume must be between 0 and 1, got {self.others_gain}")
         if self.bpm is not None and not (math.isfinite(self.bpm) and self.bpm > 0):
             raise ValueError(f"bpm must be a positive number, got {self.bpm}")
+        if self.bpm is not None and not MIN_BPM <= self.bpm <= MAX_BPM:
+            raise ValueError(f"bpm must be between {MIN_BPM:g} and {MAX_BPM:g}, got {self.bpm:g}")
         if not (math.isfinite(self.tempo_scale) and self.tempo_scale > 0):
             raise ValueError(f"tempo scale must be a positive number, got {self.tempo_scale}")
+        if not MIN_SCALE <= self.tempo_scale <= MAX_SCALE:
+            raise ValueError(f"tempo scale must be between {MIN_SCALE:g} and {MAX_SCALE:g}, "
+                             f"got {self.tempo_scale:g}")
+        m = BITRATE.fullmatch(self.bitrate) if isinstance(self.bitrate, str) else None
+        if m is None or not MIN_KBPS <= int(m.group(1)) <= MAX_KBPS:
+            raise ValueError(f"bitrate must be like 192k, between {MIN_KBPS}k and {MAX_KBPS}k, "
+                             f"got {self.bitrate!r}")
+        if not isinstance(self.only, (list, tuple)) or not all(isinstance(o, str) for o in self.only):
+            raise ValueError(f"only must be a list of voice names, got {self.only!r}")
         if abs(self.transpose) > MAX_TRANSPOSE:
             raise ValueError(f"transpose must be within {MAX_TRANSPOSE} semitones, got {self.transpose}")
         if self.title is not None and not self.title.strip():
@@ -59,6 +84,8 @@ class Options:
 
 
 def safe_filename(name: str, max_bytes: int = 200) -> str:
+    # Undecodable bytes in a file name (surrogates) become "?", and then "_".
+    name = name.encode("utf-8", "replace").decode()
     name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip(" .")
     # Most file systems cap names at 255 bytes; leave room for the extension.
     name = name.encode()[:max_bytes].decode(errors="ignore").strip(" .")
@@ -69,6 +96,8 @@ def safe_filename(name: str, max_bytes: int = 200) -> str:
 
 def process_tracks(st: ScoreTracks, out_dir: Path, opts: Options) -> list[Path]:
     opts.validate()
+    if st.load_key is not None and st.load_key != opts.load_key():
+        raise ValueError("the score was loaded with other tempo, split or title settings; load it again")
     voices = st.voices
     if not voices:
         raise ValueError("no sung voices found in the score")
@@ -86,6 +115,8 @@ def process_tracks(st: ScoreTracks, out_dir: Path, opts: Options) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     def render(track, timbre):
+        jobs.check_cancelled()
+        jobs.progress(f"rendering {track.name}")
         notes = track.notes
         if opts.transpose:
             notes = [type(n)(n.start, n.duration, n.pitch + opts.transpose, n.velocity) for n in notes]
@@ -98,6 +129,8 @@ def process_tracks(st: ScoreTracks, out_dir: Path, opts: Options) -> list[Path]:
     written: list[Path] = []
 
     def emit(stem: str, audio, track_title: str) -> None:
+        jobs.check_cancelled()
+        jobs.progress(f"writing {stem}.{opts.fmt}")
         written.append(write_audio(
             out_dir / safe_filename(stem), audio, opts.sample_rate, opts.fmt,
             **({"bitrate": opts.bitrate, "metadata": {"title": track_title, "album": st.title}}
@@ -130,13 +163,31 @@ def load_tracks(path: str | Path, opts: Options | None = None) -> ScoreTracks:
     opts = opts or Options()
     opts.validate()
     path = Path(path)
+    export = None if opts.export_musicxml is None else Path(opts.export_musicxml)
+    if export is not None and path.exists() and export.exists() and export.samefile(path):
+        raise ValueError(f"exporting MusicXML to {export} would overwrite the score itself; "
+                         "pick another name")
+    jobs.progress(f"reading {path.name}")
     score = load_score(path, omr_dpi=opts.omr_dpi)
+    jobs.check_cancelled()
+    try:
+        st = _tracks_of(score, path, opts, export)
+    except Music21Exception as exc:  # odd notation music21 can't write or measure
+        raise ScoreLoadError(f"could not process {path.name}: {exc}") from exc
+    if st.voices and st.duration < MIN_DURATION:  # (no voices: process_tracks says so)
+        raise ValueError(f"{path.name} lasts only {st.duration:.3f} s at this tempo; check the tempo settings")
+    st.load_key = opts.load_key()
+    return st
+
+
+def _tracks_of(score, path: Path, opts: Options, export: Path | None) -> ScoreTracks:
     for n in score.recurse().notes:
         n.lyrics = []  # the tracks don't use them, and the exported score shouldn't carry them
-    if opts.export_musicxml is not None:
-        export = Path(opts.export_musicxml)
+    if export is not None:
+        jobs.progress(f"saving {export.name}")
         export.parent.mkdir(parents=True, exist_ok=True)
         score.write("musicxml", fp=str(export))
+    jobs.progress("checking the score")
     # Repairs OMR made, then the bars that still look wrong (for any input).
     suffix = path.suffix.lower()
     source = "scan" if suffix in OMR_SUFFIXES else "midi" if suffix in (".mid", ".midi") else "notation"

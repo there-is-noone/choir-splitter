@@ -58,7 +58,8 @@ from pathlib import Path
 
 from music21 import clef, converter, instrument, layout, meter, note, stream, text, tie
 
-from . import platforms
+from . import jobs, platforms
+from .loaders import ScoreLoadError
 from .check import Issue, voice_range
 from .score import DUPLICATE_LINE_SHARE, NoteEvent, _differing_share, is_accompaniment
 
@@ -101,8 +102,6 @@ _NOISE = re.compile(r"^\s*(Estimating resolution as \d+|at [\w$.<>/]+\(.*\)|\.\.
 
 
 def _error(msg: str) -> Exception:
-    from .loaders import ScoreLoadError
-
     return ScoreLoadError(msg)
 
 
@@ -222,7 +221,8 @@ def find_engine() -> Engine | None:
 def pdf_page_count(path: Path) -> int | None:
     if shutil.which("pdfinfo"):
         try:
-            out = subprocess.run(["pdfinfo", str(path)], capture_output=True, text=True, timeout=60).stdout
+            out = subprocess.run(["pdfinfo", str(path)], capture_output=True, text=True, timeout=60,
+                                 **platforms.no_console()).stdout
             m = re.search(r"^Pages:\s+(\d+)", out, re.M)
             if m:
                 return int(m.group(1))
@@ -253,7 +253,7 @@ def rasterize_pdf(path: Path, outdir: Path, dpi: int = 300) -> list[Path]:
     outdir.mkdir(parents=True, exist_ok=True)
     if shutil.which("pdftoppm"):
         subprocess.run(["pdftoppm", "-r", str(dpi), "-png", str(path), str(outdir / "page")],
-                       check=True, capture_output=True, timeout=600)
+                       check=True, capture_output=True, timeout=600, **platforms.no_console())
     else:
         try:
             import fitz  # PyMuPDF
@@ -284,23 +284,43 @@ def _tail(text_: str, lines: int = 15) -> str:
     return "\n".join("    " + ln for ln in keep)
 
 
-def _run(argv: list[str], timeout: float, env: dict[str, str], what: str) -> None:
+# The sheet (page) an Audiveris log line is about: "INFO  [Siyahamba#3]  ...".
+SHEET = re.compile(r"\[[^\]#]*#(\d+)\]")
+
+
+class EngineError(ScoreLoadError):
+    """An OMR run failed; carries its output, which decides whether to read again."""
+
+    def __init__(self, message: str, output: str):
+        super().__init__(message)
+        self.output = output
+
+
+def _run(argv: list[str], timeout: float, env: dict[str, str], what: str,
+         pages: int | None = None) -> str:
+    """Run an OMR engine; returns its output (stderr, then stdout). Raises EngineError when
+    it fails, ScoreLoadError when it can't run or takes too long."""
     full_env = {**os.environ, **env}
+    seen = set()
+
+    def on_line(line: str) -> None:
+        m = SHEET.search(line)
+        if m and m.group(1) not in seen:
+            seen.add(m.group(1))
+            jobs.progress(f"reading page {m.group(1)}" + (f" of {pages}" if pages else ""))
+
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, errors="replace",
-                              timeout=timeout, env=full_env, stdin=subprocess.DEVNULL)
+        proc = jobs.run_process(argv, timeout=timeout, env=full_env, on_line=on_line)
     except subprocess.TimeoutExpired:
         raise _error(f"{what} timed out after {timeout:.0f} s "
                      "(set CHOIRSPLIT_OMR_TIMEOUT to allow more time)") from None
     except OSError as exc:
         raise _error(f"could not run {what} ({argv[0]}): {exc}") from exc
     # stdout last: it carries Audiveris's errors, which the tail of the output must keep.
-    _run.last_output = proc.stderr + proc.stdout  # for error messages and retries
+    output = proc.stderr + proc.stdout
     if proc.returncode != 0:
-        raise _error(f"{what} failed with exit code {proc.returncode}:\n{_tail(_run.last_output)}")
-
-
-_run.last_output = ""
+        raise EngineError(f"{what} failed with exit code {proc.returncode}:\n{_tail(output)}", output)
+    return output
 
 
 def fitting_dpi(output: str, dpi: int | None) -> int | None:
@@ -315,15 +335,14 @@ def fitting_dpi(output: str, dpi: int | None) -> int | None:
 
 
 def _run_audiveris(engine: Engine, path: Path, outdir: Path, timeout: float,
-                   dpi: int | None) -> int | None:
+                   dpi: int | None) -> tuple[int | None, str]:
     """Run Audiveris on `path`; returns the resolution the PDF was read at (None: its
-    default). Pages too large for Audiveris are read again once at a resolution that fits,
-    and a PDF with pages that have no staves (notes, lyrics) again without those pages."""
-    from .loaders import ScoreLoadError
-
+    default) and Audiveris's output. Pages too large for Audiveris are read again once at a
+    resolution that fits, and a PDF with pages that have no staves (notes, lyrics) again
+    without those pages."""
     is_pdf = path.suffix.lower() == ".pdf"
+    pages = pdf_page_count(path) if is_pdf else None
     skipped: set[int] = set()
-    pages = 0  # the PDF's page count, once pages are skipped
     resized = False
     while True:
         options = ["-constant", f"{AUDIVERIS_PDF_RESOLUTION}={dpi}"] if dpi is not None and is_pdf else []
@@ -331,31 +350,29 @@ def _run_audiveris(engine: Engine, path: Path, outdir: Path, timeout: float,
             options += ["-sheets", *_sheet_ranges(sorted(set(range(1, pages + 1)) - skipped))]
         argv = [*engine.argv, "-batch", "-export", *options, "-output", str(outdir), "--", str(path)]
         try:
-            _run(argv, timeout, engine.env, "Audiveris")
+            output = _run(argv, timeout, engine.env, "Audiveris", pages)
             failure = None
-        except ScoreLoadError as exc:
-            failure = exc
-        smaller = fitting_dpi(_run.last_output, dpi)
+        except EngineError as exc:
+            output, failure = exc.output, exc
+        smaller = fitting_dpi(output, dpi)
         if smaller is None:
             if failure is None:
-                return dpi
-            staffless = {int(n) for n in NO_STAVES.findall(_run.last_output)} - skipped
-            if is_pdf and staffless and not pages:
-                pages = pdf_page_count(path) or 0
-            if not staffless or not set(range(1, pages + 1)) - skipped - staffless:
+                return dpi, output
+            staffless = {int(n) for n in NO_STAVES.findall(output)} - skipped
+            if not staffless or not pages or not set(range(1, pages + 1)) - skipped - staffless:
                 raise failure
             skipped |= staffless
-            print(f"choirsplit: {path.name}: no staves found on page{'s' if len(skipped) > 1 else ''} "
-                  f"{', '.join(map(str, sorted(skipped)))}; reading the other pages", file=sys.stderr)
+            jobs.report(f"{path.name}: no staves found on page{'s' if len(skipped) > 1 else ''} "
+                        f"{', '.join(map(str, sorted(skipped)))}; reading the other pages")
             shutil.rmtree(outdir, ignore_errors=True)
             outdir.mkdir(parents=True)
             continue
         if not is_pdf or resized or smaller < 50:
-            m = TOO_LARGE_IMAGE.search(_run.last_output)
+            m = TOO_LARGE_IMAGE.search(output)
             raise _error(f"{path.name} is too large for Audiveris ({m.group(1)} pixels, at most "
                          f"{m.group(2)}); scale it down and try again")
-        print(f"choirsplit: the pages of {path.name} are too large for Audiveris at "
-              f"{dpi or AUDIVERIS_DEFAULT_DPI} dpi; reading them at {smaller} dpi", file=sys.stderr)
+        jobs.report(f"the pages of {path.name} are too large for Audiveris at "
+                    f"{dpi or AUDIVERIS_DEFAULT_DPI} dpi; reading them at {smaller} dpi")
         dpi, resized = smaller, True
         shutil.rmtree(outdir, ignore_errors=True)
         outdir.mkdir(parents=True)
@@ -380,8 +397,9 @@ def run_engine(engine: Engine, path: Path, outdir: Path, timeout: float | None =
     timeout = default_timeout(path) if timeout is None else timeout
     outdir.mkdir(parents=True, exist_ok=True)
     if engine.name == "audiveris":
-        dpi = _run_audiveris(engine, path, outdir, timeout, dpi)
+        dpi, output = _run_audiveris(engine, path, outdir, timeout, dpi)
     else:
+        output = ""
         if engine.per_page and path.suffix.lower() == ".pdf":
             pages = rasterize_pdf(path, outdir / "_pages", dpi=dpi or 300)
             if not pages:
@@ -394,13 +412,14 @@ def run_engine(engine: Engine, path: Path, outdir: Path, timeout: float | None =
             page_out.mkdir(parents=True, exist_ok=True)
             argv = [t.replace("{input}", str(page)).replace("{image}", str(page))
                      .replace("{outdir}", str(page_out)) for t in engine.argv]
-            _run(argv, max(per_page_timeout, 60.0), engine.env, f"OMR command ({engine.argv[0]})")
+            jobs.progress(f"reading page {i} of {len(pages)}")
+            output = _run(argv, max(per_page_timeout, 60.0), engine.env, f"OMR command ({engine.argv[0]})")
         shutil.rmtree(outdir / "_pages", ignore_errors=True)
     files = collect_outputs(outdir)
     if not files:
         raise _error(
             f"OMR produced no MusicXML for {path.name}; the scan may be too blurry, skewed or "
-            f"low-resolution (300 dpi recommended).\nEngine output:\n{_tail(_run.last_output)}"
+            f"low-resolution (300 dpi recommended).\nEngine output:\n{_tail(output)}"
         )
     return files, dpi
 
@@ -445,8 +464,8 @@ def recognise(path: Path, engine: Engine, dpi: int | None = None) -> tuple[list[
         if entry is not None:
             try:
                 _store(entry, files, f"{path.name}\n{engine.cache_tag}\n{read_at or ''}\n")
-            except OSError as exc:  # a read-only cache must not break loading
-                print(f"choirsplit: could not cache OMR result: {exc}", file=sys.stderr)
+            except (OSError, UnicodeError) as exc:  # a read-only cache must not break loading
+                jobs.report(f"could not cache OMR result: {exc}")
     return scores, read_at
 
 
@@ -522,14 +541,12 @@ def second_reading(path: Path, engine: Engine, scores: list[stream.Score], misse
                    dpi: int = SECOND_READING_DPI) -> int:
     """Read the PDF again at `dpi` and fill the `missed` empty sung bars of `scores` from
     it where the readings agree. Returns the bars filled."""
-    from .loaders import ScoreLoadError
-
-    print(f"choirsplit: {missed} sung bar{'s' if missed > 1 else ''} not recognised; reading "
-          f"{path.name} again at {dpi} dpi", file=sys.stderr)
+    jobs.report(f"{missed} sung bar{'s' if missed > 1 else ''} not recognised; reading "
+                f"{path.name} again at {dpi} dpi")
     try:
         second, dpi = recognise(path, engine, dpi)
     except ScoreLoadError as exc:
-        print(f"choirsplit: second reading failed: {exc}", file=sys.stderr)
+        jobs.report(f"second reading failed: {exc}")
         return 0
     return fill_from_second_reading(scores, second, dpi)
 
