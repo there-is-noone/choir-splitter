@@ -168,6 +168,8 @@ def check_score(score: stream.Score, locations: dict[int, tuple[int, int]] | Non
                     rhythms[bar_pos][k] = tuple(round(o, 4) for o, _ in notes)
             for _, e in (oe for line in lines for oe in line if not oe[1].isRest):
                 pitches = [p.ps for p in e.pitches]
+                if not pitches:  # an unpitched (percussion) note
+                    continue
                 if rng and any(p < rng[0] or p > rng[1] for p in pitches):
                     bad = next(p for p in e.pitches if p.ps < rng[0] or p.ps > rng[1])
                     add(m.number, name, f"{bad.nameWithOctave} is outside the usual range")

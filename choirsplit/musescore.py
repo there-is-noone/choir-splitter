@@ -90,7 +90,7 @@ def load_with_cli(path: Path) -> stream.Score:
             proc = subprocess.run(
                 [*cmd, "-o", str(out), str(path.resolve())],
                 capture_output=True, text=True, timeout=CLI_TIMEOUT, env=env,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, **platforms.no_console(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ScoreLoadError(f"could not run MuseScore: {exc}") from exc

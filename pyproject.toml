@@ -12,12 +12,21 @@ dependencies = ["music21>=9", "numpy>=1.24", "imageio-ffmpeg>=0.5"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+# The desktop app works without these too: they add a modern light/dark theme and
+# dragging files onto the window.
+gui = ["sv-ttk>=2.6", "darkdetect>=0.8", "tkinterdnd2>=0.6.4"]
 
 [project.scripts]
 choir-split = "choirsplit.cli:main"
 
+[project.gui-scripts]
+choir-split-ui = "choirsplit.gui:main"
+
 [tool.setuptools]
 packages = ["choirsplit"]
+
+[tool.setuptools.package-data]
+choirsplit = ["icon.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import wave
 from pathlib import Path
 
 import numpy as np
+
+from . import platforms
 
 
 class EncoderError(RuntimeError):
@@ -64,17 +67,24 @@ def write_mp3(
     # "file:" stops ffmpeg reading a name like "-x.mp3" as an option or "a:b" as a protocol.
     cmd.append(f"file:{path}")
     data = np.ascontiguousarray(audio, dtype="<f4").tobytes()
-    proc = subprocess.run(cmd, input=data, capture_output=True)
+    proc = subprocess.run(cmd, input=data, capture_output=True, **platforms.no_console())
     if proc.returncode != 0:
         raise EncoderError(f"ffmpeg failed for {path}: {proc.stderr.decode(errors='replace').strip()}")
 
 
 def write_audio(path: Path, audio: np.ndarray, sample_rate: int, fmt: str, **kwargs) -> Path:
-    path = path.parent / f"{path.name}.{fmt}"  # not with_suffix: names may contain dots
-    if fmt == "wav":
-        write_wav(path, audio, sample_rate)
-    elif fmt == "mp3":
-        write_mp3(path, audio, sample_rate, **kwargs)
-    else:
+    if fmt not in ("wav", "mp3"):
         raise ValueError(f"unsupported output format: {fmt}")
+    path = path.parent / f"{path.name}.{fmt}"  # not with_suffix: names may contain dots
+    # Written under a temporary name first, so a stopped run leaves no half-written track.
+    part = path.parent / f"{path.name}.part.{fmt}"  # (ffmpeg picks the format by extension)
+    try:
+        if fmt == "wav":
+            write_wav(part, audio, sample_rate)
+        else:
+            write_mp3(part, audio, sample_rate, **kwargs)
+        os.replace(part, path)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
     return path

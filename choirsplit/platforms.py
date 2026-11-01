@@ -4,6 +4,8 @@ directories, and the folders installers put programs (Audiveris, MuseScore) in."
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +20,29 @@ def is_macos() -> bool:
 
 def is_linux() -> bool:
     return sys.platform.startswith("linux")
+
+
+def no_console() -> dict:
+    """subprocess keyword arguments that stop a console window opening on Windows, which
+    happens for every program the desktop app (run by pythonw, without a console) starts."""
+    if is_windows():
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
+def open_folder(path: Path) -> None:
+    """Show `path` in the file manager (Explorer, Finder, or the desktop's own)."""
+    if is_windows():
+        os.startfile(str(path))  # type: ignore[attr-defined]  # Windows only
+        return
+    if is_macos():
+        cmd = ["open", str(path)]
+    elif shutil.which("xdg-open"):
+        cmd = ["xdg-open", str(path)]
+    else:
+        cmd = ["gio", "open", str(path)]
+    subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def _local_appdata() -> Path:

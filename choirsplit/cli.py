@@ -50,15 +50,22 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def output_paths(score: Path, output: Path | None, export: Path | None) -> tuple[Path, Path | None]:
+    """The output folder (default: <score name>_tracks beside the score) and where to save
+    the exported MusicXML: a bare file name, or Path() for <score name>.musicxml, goes in
+    the output folder."""
+    out_dir = output or score.with_name(score.stem + "_tracks")
+    if export is not None and export.parent == Path():  # no directory given: save it beside the tracks
+        export = out_dir / (export.name or score.stem + ".musicxml")
+    return out_dir, export
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream_ in (sys.stdout, sys.stderr):
         if hasattr(stream_, "reconfigure"):  # e.g. a Windows console or pipe in cp1252
             stream_.reconfigure(errors="replace")
     args = build_parser().parse_args(argv)
-    out_dir = args.output or args.score.with_name(args.score.stem + "_tracks")
-    export = args.export_musicxml
-    if export is not None and export.parent == Path():  # no directory given: save it beside the tracks
-        export = out_dir / (export.name or args.score.stem + ".musicxml")
+    out_dir, export = output_paths(args.score, args.output, args.export_musicxml)
     # Every option goes through one Options object, so the CLI and process_file agree.
     opts = Options(
         mode=args.mode, full_mix=args.full_mix, fmt=args.fmt, bitrate=args.bitrate,

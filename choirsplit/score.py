@@ -91,6 +91,7 @@ class ScoreTracks:
     issues: list = field(default_factory=list)  # check.Issue: OMR repairs and suspect bars
     recognised: bool = False  # read from a PDF/image by optical music recognition
     merged: list[str] = field(default_factory=list)  # staves whose second voice only copied the first
+    load_key: tuple | None = None  # pipeline.Options.load_key() of the settings it was loaded with
 
     @property
     def voices(self) -> list[Track]:
