@@ -256,7 +256,7 @@ macOS include it. Elsewhere:
 
 Without the `gui` extra the window still works, with the system's plain theme and
 without dragging files in. Dragging files in is also off on Linux with Tk 9, where the
-drag-and-drop library crashes; choose the score with **Choose file…** there.
+drag-and-drop library crashed the app in testing; choose the score with **Choose file…** there.
 `CHOIRSPLIT_DND=1` forces it on (at your own risk) and `CHOIRSPLIT_DND=0` turns it off.
 
 On macOS the menu bar shows "Python" rather than "Choir Split".

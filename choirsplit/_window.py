@@ -66,16 +66,15 @@ class App:
         """sv-ttk (Windows 11 style, light or dark like the system) where installed, except
         on macOS, whose native theme already follows dark mode."""
         style = ttk.Style(self.root)
+        try:  # (also on macOS, where aqua turns dark by itself but our own colours don't)
+            import darkdetect
+            self.dark = (darkdetect.theme() or "").lower() == "dark"
+        except Exception:
+            self.dark = False
         if not platforms.is_macos():
             try:
                 import sv_ttk
-                try:
-                    import darkdetect
-                    dark = (darkdetect.theme() or "").lower() == "dark"
-                except Exception:
-                    dark = False
-                sv_ttk.set_theme("dark" if dark else "light", self.root)
-                self.dark = dark
+                sv_ttk.set_theme("dark" if self.dark else "light", self.root)
                 return True
             except Exception:
                 pass
@@ -84,7 +83,8 @@ class App:
             if name in names:
                 style.theme_use(name)
                 break
-        self.dark = False
+        if not platforms.is_macos():
+            self.dark = False  # vista and clam are light whatever the system uses
         return False
 
     def _fonts(self) -> None:
@@ -653,6 +653,10 @@ class App:
                     text="To read PDFs and photos, install Audiveris (see INSTALL.md).")
                 self.engine_caption.grid()
             return
+        # The job's last event: let its thread end, or _sync would still see it busy and
+        # leave every input disabled.
+        if self.worker.thread is not None:
+            self.worker.thread.join(2)
         self._finished()
         if kind == "voices":
             _, title, seconds, names = event

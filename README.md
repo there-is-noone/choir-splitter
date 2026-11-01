@@ -44,15 +44,15 @@ the command does: solo/practice tracks, speed, key, voices, MusicXML export, and
 score**. A PDF is read once per session even if you check it and make tracks from it.
 
 ```bash
-pipx install ".[gui]"                 # the [gui] extra adds the modern theme and drag and drop
+pipx install ".[gui]"                 # the [gui] extra adds a modern theme (Windows, Linux) and drag and drop
 choir-split-ui                        # or: choir-split-ui "Ave Verum.pdf"
 choir-split-ui --install-shortcut     # add it to the Start menu / Applications / app menu
 ```
 
-It runs on Windows, macOS and Linux and follows the system's light or dark mode. A long
-PDF reading shows the page it is on and can be cancelled. On Linux with Tk 9 the window
-can't accept dragged files: tkdnd crashes there, so the score is chosen with **Choose
-file…** instead. [INSTALL.md](INSTALL.md#the-desktop-app) has the details for each system.
+It runs on Windows, macOS (in the native look) and Linux, and follows the system's light
+or dark mode. A long PDF reading shows the page it is on and can be cancelled. On Linux
+with Tk 9, dragging files in is off, because the drag-and-drop library crashed the app
+in testing; choose the score with **Choose file…** there. [INSTALL.md](INSTALL.md#the-desktop-app) has the details for each system.
 
 ## Usage
 

@@ -260,13 +260,13 @@ def tk_hint() -> str:
             "  Arch: sudo pacman -S tk")
 
 
-def _tell(message: str) -> None:
-    """Show a start-up failure, also when there's no console (pythonw on Windows)."""
-    print(message, file=sys.stderr)
+def _tell(message: str, error: bool = True) -> None:
+    """Show a start-up message, also when there's no console (pythonw on Windows)."""
+    print(message, file=sys.stderr if error else sys.stdout)
     if platforms.is_windows():
         try:
             import ctypes
-            ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, 0x10)
+            ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, 0x10 if error else 0x40)
         except Exception:
             pass
 
@@ -299,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
     if "--install-shortcut" in args:
         from .shortcut import install_shortcut
         try:
-            print(f"added {install_shortcut()}")
+            _tell(f"added {install_shortcut()}", error=False)
         except (OSError, RuntimeError) as exc:
             _tell(f"could not add the shortcut: {exc}")
             return 1

@@ -283,7 +283,9 @@ def test_mac_shortcut_is_an_app_bundle(monkeypatch, tmp_path):
     launcher = app / "Contents" / "MacOS" / "choirsplit"
     script = launcher.read_text()
     assert "export CHOIRSPLIT_HOME='/Users/me/choir data'\n" in script
-    assert script.rstrip().endswith('-m choirsplit.gui "$@"') and launcher.stat().st_mode & 0o111
+    assert script.rstrip().endswith('-m choirsplit.gui "$@"')
+    if sys.platform != "win32":  # (Windows sets exec bits from the file extension)
+        assert launcher.stat().st_mode & 0o111
     import plistlib
     info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
     assert info["CFBundleExecutable"] == "choirsplit"
@@ -306,12 +308,25 @@ def test_windows_shortcut_goes_through_powershell(monkeypatch, tmp_path):
 
 
 def test_main_installs_the_shortcut_without_tk(monkeypatch, capsys, tmp_path):
+    set_platform(monkeypatch, "linux")  # (on Windows a message box would wait for a click)
     monkeypatch.setattr(shortcut, "install_shortcut", lambda: tmp_path / "x.desktop")
     assert gui.main(["--install-shortcut"]) == 0
     assert "added" in capsys.readouterr().out
 
 
+def test_windows_shows_start_up_messages_in_a_box(monkeypatch, capsys):
+    set_platform(monkeypatch, "win32")
+    boxes = []
+    fake = SimpleNamespace(windll=SimpleNamespace(user32=SimpleNamespace(
+        MessageBoxW=lambda hwnd, text, title, flags: boxes.append((text, title, flags)))))
+    monkeypatch.setitem(sys.modules, "ctypes", fake)
+    gui._tell("added C:/x.lnk", error=False)
+    gui._tell("could not add the shortcut")
+    assert boxes == [("added C:/x.lnk", gui.APP_NAME, 0x40), ("could not add the shortcut", gui.APP_NAME, 0x10)]
+
+
 def test_main_without_tk_explains(monkeypatch, capsys):
+    set_platform(monkeypatch, "linux")
     monkeypatch.setitem(sys.modules, "tkinter", None)  # import tkinter raises ImportError
     monkeypatch.setattr(sys, "stderr", io.StringIO())
     assert gui.main([]) == 1
