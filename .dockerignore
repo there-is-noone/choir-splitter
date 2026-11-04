@@ -1,0 +1,30 @@
+# Git history – not needed inside the image
+.git
+.gitignore
+
+# Python caches and build artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# Test suite (not needed at runtime; install with `pip install -e .[test]` if running tests)
+tests/
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS junk
+.DS_Store
+
+# Documentation source (README stays; heavy docs do not)
+INSTALL.md
