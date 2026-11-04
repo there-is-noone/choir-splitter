@@ -23,6 +23,18 @@ Pick your system:
 
 Windows 10 or 11, 64-bit. Type the commands below into **PowerShell** or **Command Prompt**.
 
+### ONE-LINER to solve the problems
+#### 1. Unzip the file to a directory of your choice
+#### 2. move in the **PowerShell** or **Command Prompt** to this directory
+```
+cd <path-to-the-choirsplit directory>
+```
+#### 3. Holy One-liner
+This command should install all of the needed dependencies and the GUI for the app at once, might take a while to run
+```
+winget install Python.Python.3.12 audiveris.org.Audiveris MuseScore.MuseScore --accept-package-agreements --accept-source-agreements; py -m pip install --user pipx; py -m pipx ensurepath; py -m pipx install "choirsplit[gui] @ git+https://github.com/there-is-noone/choir-splitter.git" --force; ~\.local\bin\choir-split-ui.exe --install-shortcut
+```
+
 ### 1. Python
 
 Install Python from <https://www.python.org/downloads/windows/>. On the first installer
