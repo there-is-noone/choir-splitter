@@ -13,7 +13,7 @@ MusicXML (`.musicxml`, `.mxl`), MuseScore (`.mscz`, `.mscx`) and MIDI files need
 steps 1 and 2.
 
 Pick your system:
-- [Windows](#windows)
+- [Windows](#widdows)
 - [macOS](#macos)
 - [Linux](#linux)
 
@@ -195,31 +195,17 @@ Debian/Ubuntu.
 With the `choir_splitter` folder downloaded or cloned:
 
 ```bash
-pipx install path/to/projekty/choir_splitter
-```
-
-or:
-
-```bash
-cd projekty/choir_splitter
+cd choir-splitter
 python3 -m venv .venv
-.venv/bin/pip install .
+.venv/bin/pip install .[gui] #installs the project with the graphical interface
+scripts/install_omr.sh #script to install audiveris as the .pdf reader
+choir-split-ui # opens user interface
+
 ```
 
 A system ffmpeg (e.g. `sudo apt install ffmpeg`) is used when present; otherwise the
 bundled one is.
 
-### PDFs (optional): Audiveris
-
-With no root needed, on x86-64:
-
-```bash
-scripts/install_omr.sh
-```
-
-This puts Audiveris under `~/.local/share/choirsplit/audiveris/`, with OCR data for part
-names and titles. Alternatively, install the official `.deb` from the Audiveris releases
-page into `/opt/audiveris`.
 
 ### MuseScore (optional)
 
