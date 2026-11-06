@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 import tkinter as tk
 import tkinter.font as tkfont
@@ -9,15 +10,32 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from . import platforms
-from .gui import (APP_NAME, BITRATES, MODE_HINTS, READING_DETAIL, GuiState, Worker, dnd_allowed,
-                  dropped_files, load_settings, save_settings, supported, to_options)
+from .gui import (
+    APP_NAME,
+    BITRATES,
+    MODE_HINTS,
+    READING_DETAIL,
+    GuiState,
+    Worker,
+    dnd_allowed,
+    dropped_files,
+    load_settings,
+    save_settings,
+    supported,
+    to_options,
+)
 from .loaders import OMR_SUFFIXES, supported_suffixes
 
-PAD = 24  # outer padding
-GAP = 16  # between groups
-SMALL = 8  # between a label and its control
 VOICE_COLUMNS = 3
-LINUX_FONTS = ("cantarell", "adwaita sans", "inter", "noto sans", "ubuntu", "dejavu sans", "liberation sans")
+LINUX_FONTS = (
+    "cantarell",
+    "adwaita sans",
+    "inter",
+    "noto sans",
+    "ubuntu",
+    "dejavu sans",
+    "liberation sans",
+)
 
 
 def _minutes(seconds: float) -> str:
@@ -27,6 +45,8 @@ def _minutes(seconds: float) -> str:
 class App:
     def __init__(self, root: tk.Tk, initial: str | None = None) -> None:
         self.root = root
+        root.geometry("1200x800")
+        self._resize_after: str | None = None  # debounce token for <Configure>
         self.worker = Worker()
         self.state = GuiState()
         load_settings(self.state)
@@ -45,6 +65,7 @@ class App:
         self._fonts()
         self._vars()
         self._build()
+        root.bind("<Configure>", self._on_resize)
         self.dnd = self._enable_dnd()
         self._show_score()
         self._sync()
@@ -68,62 +89,136 @@ class App:
         style = ttk.Style(self.root)
         try:  # (also on macOS, where aqua turns dark by itself but our own colours don't)
             import darkdetect
+
             self.dark = (darkdetect.theme() or "").lower() == "dark"
         except Exception:
             self.dark = False
+
         if not platforms.is_macos():
             try:
                 import sv_ttk
+
                 sv_ttk.set_theme("dark" if self.dark else "light", self.root)
                 return True
             except Exception:
                 pass
+
         names = style.theme_names()
         for name in ("aqua", "vista", "clam"):
             if name in names:
                 style.theme_use(name)
                 break
-        if not platforms.is_macos():
-            self.dark = False  # vista and clam are light whatever the system uses
+
         return False
 
-    def _fonts(self) -> None:
-        base = tkfont.nametofont("TkDefaultFont")
-        if platforms.is_linux():
-            # Some Tk builds (uv's own Pythons) see only X's core fonts and default to the
-            # bitmap "fixed": use the best sans-serif family this Tk can find instead.
+    def _fonts(self, k: float | None = None) -> None:
+        """Size every named Tk font and derive layout constants from *k*.
+
+        *k* is the base scale factor (1.0 = normal).  When called for the
+        first time (k is None) the factor is read from CHOIRSPLIT_SCALE (default
+        1.0) and stored in ``self._k_base``.  Subsequent calls (from the
+        <Configure> debounce) pass a dynamic *k_dyn* that may be larger when
+        the window is wide/tall.
+        """
+        if k is None:
+            try:
+                self._k_base = float(os.getenv("CHOIRSPLIT_SCALE", "1.0"))
+            except ValueError:
+                self._k_base = 1.0
+            k = self._k_base
+
+        base_size = round(11 * k)  # positive point size – Tk scales these correctly
+
+        # Apply to every named font so built-in Tk dialogs and sv-ttk fonts
+        # all scale together.
+        for font_name in tkfont.names(self.root):
+            try:
+                f = tkfont.nametofont(font_name)
+                f.configure(size=base_size)
+            except tk.TclError:
+                pass
+
+        # Prefer a good Linux sans-serif family (first time only: family is sticky)
+        if platforms.is_linux() and not hasattr(self, "_linux_family_set"):
+            self._linux_family_set = True
+            base_font = tkfont.nametofont("TkDefaultFont")
             families = {f.lower(): f for f in tkfont.families(self.root)}
-            good = next((families[f] for f in LINUX_FONTS if f in families), None)
-            if good and base.actual("family").lower() not in LINUX_FONTS:
+            good = next((families[n] for n in LINUX_FONTS if n in families), None)
+            if good and base_font.actual("family").lower() not in LINUX_FONTS:
                 for name in tkfont.names(self.root):
-                    font = tkfont.nametofont(name)
                     if name.startswith(("Tk", "SunValley")) and "Fixed" not in name:
-                        font.configure(family=good)
-        if not self.themed and not platforms.is_macos() and 0 < base.actual("size") < 10:
-            for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
-                tkfont.nametofont(name).configure(size=10)
+                        try:
+                            tkfont.nametofont(name).configure(family=good)
+                        except tk.TclError:
+                            pass
+
+        body = tkfont.nametofont(
+            "SunValleyBodyFont" if self.themed else "TkDefaultFont"
+        )
+        family = body.actual("family")
+
+        # Relative offsets use positive points; +N = larger, −N = smaller.
+        title_size = round(base_size + 6 * k)
+        bold_size = round(base_size + 2 * k)
+        caption_size = max(round(base_size - 2 * k), 8)
+
+        if hasattr(self, "title_font"):
+            self.title_font.configure(family=family, size=title_size, weight="bold")
+            self.bold_font.configure(family=family, size=bold_size, weight="bold")
+            self.caption_font.configure(family=family, size=caption_size)
+        else:
+            self.title_font = tkfont.Font(family=family, size=title_size, weight="bold")
+            self.bold_font = tkfont.Font(family=family, size=bold_size, weight="bold")
+            self.caption_font = tkfont.Font(family=family, size=caption_size)
+
+        # Layout spacing constants derived from k.
+        self.pad = round(10 * k)
+        self.gap = round(6 * k)
+        self.small_gap = round(3 * k)
+        row_height = round(24 * k)
+
         style = ttk.Style(self.root)
-        # Derive from the font labels really use: sv-ttk has its own, sized in pixels (so a
-        # point size from Tk's default would come out far larger on a high-DPI screen).
-        body = tkfont.nametofont("SunValleyBodyFont" if self.themed else "TkDefaultFont")
-        family, size = body.actual("family"), int(body.cget("size"))
-
-        def bigger(points: int) -> int:  # negative sizes are pixels: grow away from zero
-            return size - round(points * 1.33) if size < 0 else size + points
-
-        self.title_font = tkfont.Font(family=family, size=bigger(9), weight="bold")
-        self.bold_font = tkfont.Font(family=family, size=bigger(1), weight="bold")
-        self.caption_font = tkfont.Font(family=family, size=bigger(0))
         muted = "#9a9a9a" if self.dark else "#6b6b6b"
+        style.configure(".", font=body)
+        style.configure("TLabel", font=body)
         style.configure("Title.TLabel", font=self.title_font)
         style.configure("Name.TLabel", font=self.bold_font)
         style.configure("Caption.TLabel", font=self.caption_font, foreground=muted)
-        style.configure("Error.TLabel", foreground="#ff6b6b" if self.dark else "#c42b1c")
+        style.configure(
+            "Error.TLabel", foreground="#ff6b6b" if self.dark else "#c42b1c"
+        )
         style.configure("Ok.TLabel", foreground="#6ccb5f" if self.dark else "#0f7b0f")
+
+        style.configure("TButton", padding=(self.gap, self.small_gap))
+        style.configure("TEntry", padding=self.small_gap)
+        style.configure("TCombobox", padding=self.small_gap)
+        style.configure("TSpinbox", padding=self.small_gap)
+        style.configure("TLabelframe", padding=self.gap)
+        style.configure("Treeview", rowheight=row_height, font=body)
+        style.configure("Treeview.Heading", font=self.bold_font)
+
         if not self.themed:
             style.configure("Card.TFrame", relief="solid", borderwidth=1)
         self.switch = "Switch.TCheckbutton" if self.themed else "TCheckbutton"
         self.segment = "Toggle.TButton" if self.themed else "Toolbutton"
+
+    def _on_resize(self, event) -> None:
+        """Debounced <Configure> handler: re-scale fonts to window size."""
+        if event.widget is not self.root:
+            return
+        if self._resize_after is not None:
+            self.root.after_cancel(self._resize_after)
+        self._resize_after = self.root.after(150, self._apply_resize)
+
+    def _apply_resize(self) -> None:
+        self._resize_after = None
+        w = self.root.winfo_width()
+        h = self.root.winfo_height()
+        if w < 2 or h < 2:
+            return
+        ratio = min(w / 1200, h / 800)
+        k_dyn = max(1.0, min(ratio, 3.0)) * self._k_base
+        self._fonts(k_dyn)
 
     def _vars(self) -> None:
         s = self.state
@@ -141,7 +236,9 @@ class App:
         self.v_split_voices = tk.BooleanVar(value=s.split_voices)
         self.v_split_chords = tk.BooleanVar(value=s.split_chords)
         self.v_export = tk.BooleanVar(value=s.export_musicxml)
-        self.v_detail = tk.StringVar(value=next(k for k, d in READING_DETAIL.items() if d == s.omr_dpi))
+        self.v_detail = tk.StringVar(
+            value=next(k for k, d in READING_DETAIL.items() if d == s.omr_dpi)
+        )
         self.v_output = tk.StringVar()
         self.v_more = tk.BooleanVar(value=False)
         for var in (self.v_mode, self.v_fmt, self.v_fixed):
@@ -156,35 +253,44 @@ class App:
         root = self.root
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
-        main = ttk.Frame(root, padding=(PAD, PAD, PAD, SMALL))
-        main.grid(row=0, column=0, sticky="nsew")
+        main = ttk.Frame(root, padding=(self.pad, self.pad, self.pad, self.small_gap))
+        main.grid(padx=self.pad, pady=self.pad, sticky="nsew")
         main.columnconfigure(1, weight=1)
         self.main = main
         row = 0
 
-        ttk.Label(main, text=APP_NAME, style="Title.TLabel").grid(row=row, column=0, columnspan=2, sticky="w")
+        ttk.Label(main, text=APP_NAME, style="Title.TLabel").grid(
+            row=row, column=0, columnspan=2, sticky="w"
+        )
         row += 1
-        ttk.Label(main, text="Turn a score into practice tracks for every voice.",
-                  style="Caption.TLabel").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, GAP))
+        ttk.Label(
+            main,
+            text="Turn a score into practice tracks for every voice.",
+            style="Caption.TLabel",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, self.gap))
         row += 1
 
         # Drop zone
-        zone = ttk.Frame(main, style="Card.TFrame", padding=GAP)
-        zone.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, GAP))
+        zone = ttk.Frame(main, style="Card.TFrame", padding=self.gap)
+        zone.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, self.gap))
         zone.columnconfigure(0, weight=1)
         self.zone = zone
         self.zone_title = ttk.Label(zone, style="Name.TLabel", anchor="center")
         self.zone_title.grid(row=0, column=0, sticky="ew")
-        self.zone_caption = ttk.Label(zone, style="Caption.TLabel", anchor="center", justify="center")
-        self.zone_caption.grid(row=1, column=0, sticky="ew", pady=(4, SMALL))
+        self.zone_caption = ttk.Label(
+            zone, style="Caption.TLabel", anchor="center", justify="center"
+        )
+        self.zone_caption.grid(row=1, column=0, sticky="ew", pady=(4, self.small_gap))
         buttons = ttk.Frame(zone)
         buttons.grid(row=2, column=0)
-        self.choose_button = ttk.Button(buttons, text="Choose file…", command=self._browse)
+        self.choose_button = ttk.Button(
+            buttons, text="Choose file…", command=self._browse
+        )
         self.choose_button.grid(row=0, column=0)
         self.clear_button = ttk.Button(buttons, text="Clear", command=self._clear_score)
-        self.clear_button.grid(row=0, column=1, padx=(SMALL, 0))
+        self.clear_button.grid(row=0, column=1, padx=(self.small_gap, 0))
         self.engine_caption = ttk.Label(zone, style="Caption.TLabel", anchor="center")
-        self.engine_caption.grid(row=3, column=0, sticky="ew", pady=(SMALL, 0))
+        self.engine_caption.grid(row=3, column=0, sticky="ew", pady=(self.small_gap, 0))
         self.engine_caption.grid_remove()  # shown only when PDF reading needs Audiveris
         for w in (zone, self.zone_title, self.zone_caption, self.engine_caption):
             w.bind("<Button-1>", lambda e: self._browse())
@@ -194,25 +300,35 @@ class App:
         ttk.Label(main, text="Tracks").grid(row=row, column=0, sticky="w")
         seg = ttk.Frame(main)
         seg.grid(row=row, column=1, sticky="ew")
-        for i, (mode, label) in enumerate((("solo", "Solo"), ("practice", "Practice"), ("both", "Both"))):
+        for i, (mode, label) in enumerate(
+            (("solo", "Solo"), ("practice", "Practice"), ("both", "Both"))
+        ):
             seg.columnconfigure(i, weight=1, uniform="seg")
-            ttk.Radiobutton(seg, text=label, value=mode, variable=self.v_mode,
-                            style=self.segment).grid(row=0, column=i, sticky="ew")
+            ttk.Radiobutton(
+                seg, text=label, value=mode, variable=self.v_mode, style=self.segment
+            ).grid(row=0, column=i, sticky="ew")
         row += 1
         self.mode_hint = ttk.Label(main, style="Caption.TLabel")
-        self.mode_hint.grid(row=row, column=1, sticky="w", pady=(4, GAP))
+        self.mode_hint.grid(row=row, column=1, sticky="w", pady=(4, self.gap))
         row += 1
 
-        self.others_scale = self._slider(main, row, "Other voices", self.v_others, 0, 100, 5)
+        self.others_scale = self._slider(
+            main, row, "Other voices", self.v_others, 0, 100, 5
+        )
         row += 1
         self._slider(main, row, "Speed", self.v_speed, 50, 150, 5)
         row += 1
 
-        ttk.Checkbutton(main, text="Add a track with all voices", variable=self.v_full_mix,
-                        style=self.switch).grid(row=row, column=0, columnspan=2, sticky="w", pady=(SMALL, 4))
+        ttk.Checkbutton(
+            main,
+            text="Add a track with all voices",
+            variable=self.v_full_mix,
+            style=self.switch,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(self.small_gap, 4))
         row += 1
-        ttk.Checkbutton(main, text="Include piano / organ", variable=self.v_acc,
-                        style=self.switch).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, GAP))
+        ttk.Checkbutton(
+            main, text="Include piano / organ", variable=self.v_acc, style=self.switch
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, self.gap))
         row += 1
 
         # Voices
@@ -222,7 +338,9 @@ class App:
         vrow.columnconfigure(0, weight=1)
         self.voices_caption = ttk.Label(vrow, text="All voices", style="Caption.TLabel")
         self.voices_caption.grid(row=0, column=0, sticky="w")
-        self.find_button = ttk.Button(vrow, text="Find voices", command=lambda: self._start("voices"))
+        self.find_button = ttk.Button(
+            vrow, text="Find voices", command=lambda: self._start("voices")
+        )
         self.find_button.grid(row=0, column=1, sticky="e")
         row += 1
         self.voice_box = ttk.Frame(main)
@@ -230,70 +348,128 @@ class App:
         row += 1
 
         # Save to
-        ttk.Label(main, text="Save to").grid(row=row, column=0, sticky="w", pady=(GAP, 0))
+        ttk.Label(main, text="Save to").grid(
+            row=row, column=0, sticky="w", pady=(self.gap, 0)
+        )
         out = ttk.Frame(main)
-        out.grid(row=row, column=1, sticky="ew", pady=(GAP, 0))
+        out.grid(row=row, column=1, sticky="ew", pady=(self.gap, 0))
         out.columnconfigure(0, weight=1)
         self.output_entry = ttk.Entry(out, textvariable=self.v_output, state="readonly")
         self.output_entry.grid(row=0, column=0, sticky="ew")
-        self.output_button = ttk.Button(out, text="Change…", command=self._choose_output)
-        self.output_button.grid(row=0, column=1, padx=(SMALL, 0))
+        self.output_button = ttk.Button(
+            out, text="Change…", command=self._choose_output
+        )
+        self.output_button.grid(row=0, column=1, padx=(self.small_gap, 0))
         row += 1
 
         # More options
-        self.more_toggle = ttk.Checkbutton(main, text="More options…", variable=self.v_more,
-                                           style="Toolbutton", command=self._toggle_more)
-        self.more_toggle.grid(row=row, column=0, columnspan=2, sticky="w", pady=(GAP, 0))
+        self.more_toggle = ttk.Checkbutton(
+            main,
+            text="More options…",
+            variable=self.v_more,
+            style="Toolbutton",
+            command=self._toggle_more,
+        )
+        self.more_toggle.grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(self.gap, 0)
+        )
         row += 1
         self.more = self._build_more(main)
-        self.more.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(SMALL, 0))
+        self.more.grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=(self.small_gap, 0)
+        )
         self.more.grid_remove()
         row += 1
 
         # Status
         self.status = ttk.Frame(main)
-        self.status.grid(row=row, column=0, columnspan=2, sticky="nsew", pady=(GAP, 0))
+        self.status.grid(
+            row=row, column=0, columnspan=2, sticky="nsew", pady=(self.gap, 0)
+        )
         self.status.columnconfigure(0, weight=1)
         main.rowconfigure(row, weight=1)
         self.progress = ttk.Progressbar(self.status, mode="indeterminate")
         self.progress.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.stage = ttk.Label(self.status, style="Caption.TLabel")
         self.stage.grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self.cancel_button = ttk.Button(self.status, text="Cancel", command=self.worker.cancel)
+        self.cancel_button = ttk.Button(
+            self.status, text="Cancel", command=self.worker.cancel
+        )
         self.cancel_button.grid(row=1, column=1, sticky="e", pady=(4, 0))
         self.banner = ttk.Label(self.status, wraplength=520, justify="left")
-        self.banner.grid(row=2, column=0, sticky="w", pady=(SMALL, 0))
+        self.banner.grid(row=2, column=0, sticky="w", pady=(self.small_gap, 0))
         actions = ttk.Frame(self.status)
-        actions.grid(row=2, column=1, sticky="e", pady=(SMALL, 0))
-        self.open_button = ttk.Button(actions, text="Open folder", command=self._open_folder)
+        actions.grid(row=2, column=1, sticky="e", pady=(self.small_gap, 0))
+        self.open_button = ttk.Button(
+            actions, text="Open folder", command=self._open_folder
+        )
         self.open_button.grid(row=0, column=0)
-        self.tree = ttk.Treeview(self.status, columns=("bar", "page", "voice", "problem"), show="headings", height=7)
-        for col, text, width, stretch in (("bar", "Bar", 50, False), ("page", "Page", 50, False),
-                                          ("voice", "Voice", 100, False),
-                                          ("problem", "Problem", 300, True)):
+        self.tree = ttk.Treeview(
+            self.status,
+            columns=("bar", "page", "voice", "problem"),
+            show="headings",
+            height=7,
+        )
+        for col, text, width, stretch in (
+            ("bar", "Bar", 50, False),
+            ("page", "Page", 50, False),
+            ("voice", "Voice", 100, False),
+            ("problem", "Problem", 300, True),
+        ):
             self.tree.heading(col, text=text, anchor="w")
             self.tree.column(col, width=width, stretch=stretch, anchor="w")
         self.tree.tag_configure("group", font=self.bold_font)
-        self.tree.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(SMALL, 0))
+        self.tree.grid(
+            row=3, column=0, columnspan=2, sticky="nsew", pady=(self.small_gap, 0)
+        )
         self.status.rowconfigure(3, weight=1)
-        for w in (self.progress, self.stage, self.cancel_button, self.banner, actions, self.tree,
-                  self.open_button):
+        for w in (
+            self.progress,
+            self.stage,
+            self.cancel_button,
+            self.banner,
+            actions,
+            self.tree,
+            self.open_button,
+        ):
             w.grid_remove()
         self.actions = actions
 
         # Footer
-        foot = ttk.Frame(root, padding=(PAD, SMALL, PAD, PAD - SMALL))
+        foot = ttk.Frame(
+            root,
+            padding=(self.pad, self.small_gap, self.pad, self.pad - self.small_gap),
+        )
         foot.grid(row=1, column=0, sticky="ew")
         foot.columnconfigure(1, weight=1)
-        ttk.Separator(foot).grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, GAP - 4))
-        self.check_button = ttk.Button(foot, text="Check score", command=lambda: self._start("check"))
+        ttk.Separator(foot).grid(
+            row=0, column=0, columnspan=3, sticky="ew", pady=(0, self.gap - 4)
+        )
+        self.check_button = ttk.Button(
+            foot, text="Check score", command=lambda: self._start("check")
+        )
         self.check_button.grid(row=1, column=0, sticky="w")
-        self.make_button = ttk.Button(foot, text="Make tracks", style="Accent.TButton",
-                                      command=lambda: self._start("make"))
-        self.make_button.grid(row=1, column=2, sticky="e", ipadx=SMALL)
+        self.make_button = ttk.Button(
+            foot,
+            text="Make tracks",
+            style="Accent.TButton",
+            command=lambda: self._start("make"),
+        )
+        self.make_button.grid(row=1, column=2, sticky="e", ipadx=self.small_gap)
 
-    def _slider(self, parent, row: int, label: str, var: tk.DoubleVar, lo: int, hi: int, step: int):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=4, padx=(0, GAP))
+    def _slider(
+        self,
+        parent,
+        row: int,
+        label: str,
+        var: tk.DoubleVar,
+        lo: int,
+        hi: int,
+        step: int,
+    ):
+        ttk.Label(parent, text=label).grid(
+            row=row, column=0, sticky="w", pady=4, padx=(0, self.gap)
+        )
         frame = ttk.Frame(parent)
         frame.grid(row=row, column=1, sticky="ew", pady=4)
         frame.columnconfigure(0, weight=1)
@@ -307,7 +483,7 @@ class App:
 
         scale = ttk.Scale(frame, from_=lo, to=hi, variable=var)
         scale.grid(row=0, column=0, sticky="ew")
-        value.grid(row=0, column=1, padx=(SMALL, 0))
+        value.grid(row=0, column=1, padx=(self.small_gap, 0))
         var.trace_add("write", moved)  # dragged, or set by "Reset to defaults"
         moved()
         return scale
@@ -318,55 +494,89 @@ class App:
         r = 0
 
         def label(text):
-            ttk.Label(more, text=text).grid(row=r, column=0, sticky="w", pady=4, padx=(0, GAP))
+            ttk.Label(more, text=text).grid(
+                row=r, column=0, sticky="w", pady=4, padx=(0, self.gap)
+            )
 
         label("Song title")
         self.title_entry = ttk.Entry(more, textvariable=self.v_title)
         self.title_entry.grid(row=r, column=1, sticky="ew", pady=4)
         r += 1
-        ttk.Label(more, text="Leave empty to use the score's title", style="Caption.TLabel").grid(
-            row=r, column=1, sticky="w")
+        ttk.Label(
+            more, text="Leave empty to use the score's title", style="Caption.TLabel"
+        ).grid(row=r, column=1, sticky="w")
         r += 1
         label("Change key")
         key = ttk.Frame(more)
         key.grid(row=r, column=1, sticky="w", pady=4)
-        self.transpose_box = ttk.Spinbox(key, from_=-24, to=24, increment=1, width=5,
-                                         textvariable=self.v_transpose)
+        self.transpose_box = ttk.Spinbox(
+            key, from_=-24, to=24, increment=1, width=5, textvariable=self.v_transpose
+        )
         self.transpose_box.grid(row=0, column=0)
-        ttk.Label(key, text="semitones", style="Caption.TLabel").grid(row=0, column=1, padx=(SMALL, 0))
+        ttk.Label(key, text="semitones", style="Caption.TLabel").grid(
+            row=0, column=1, padx=(self.small_gap, 0)
+        )
         r += 1
         label("Tempo")
         tempo = ttk.Frame(more)
         tempo.grid(row=r, column=1, sticky="w", pady=4)
-        ttk.Checkbutton(tempo, text="Fixed", variable=self.v_fixed).grid(row=0, column=0)
-        self.bpm_box = ttk.Spinbox(tempo, from_=20, to=300, increment=1, width=6, textvariable=self.v_bpm)
-        self.bpm_box.grid(row=0, column=1, padx=(SMALL, 0))
-        ttk.Label(tempo, text="beats per minute", style="Caption.TLabel").grid(row=0, column=2, padx=(SMALL, 0))
+        ttk.Checkbutton(tempo, text="Fixed", variable=self.v_fixed).grid(
+            row=0, column=0
+        )
+        self.bpm_box = ttk.Spinbox(
+            tempo, from_=20, to=300, increment=1, width=6, textvariable=self.v_bpm
+        )
+        self.bpm_box.grid(row=0, column=1, padx=(self.small_gap, 0))
+        ttk.Label(tempo, text="beats per minute", style="Caption.TLabel").grid(
+            row=0, column=2, padx=(self.small_gap, 0)
+        )
         r += 1
         label("File type")
         ftype = ttk.Frame(more)
         ftype.grid(row=r, column=1, sticky="w", pady=4)
         for i, (fmt, text) in enumerate((("mp3", "MP3"), ("wav", "WAV"))):
-            ttk.Radiobutton(ftype, text=text, value=fmt, variable=self.v_fmt,
-                            style=self.segment, width=6).grid(row=0, column=i)
-        ttk.Label(ftype, text="Quality").grid(row=0, column=2, padx=(GAP, SMALL))
-        self.bitrate_box = ttk.Combobox(ftype, values=BITRATES, textvariable=self.v_bitrate,
-                                        state="readonly", width=6)
+            ttk.Radiobutton(
+                ftype,
+                text=text,
+                value=fmt,
+                variable=self.v_fmt,
+                style=self.segment,
+                width=6,
+            ).grid(row=0, column=i)
+        ttk.Label(ftype, text="Quality").grid(
+            row=0, column=2, padx=(self.gap, self.small_gap)
+        )
+        self.bitrate_box = ttk.Combobox(
+            ftype,
+            values=BITRATES,
+            textvariable=self.v_bitrate,
+            state="readonly",
+            width=6,
+        )
         self.bitrate_box.grid(row=0, column=3)
         r += 1
-        for text, var in (("Split a staff that holds two voices (e.g. S + A)", self.v_split_voices),
-                          ("Split two-note chords into upper and lower parts", self.v_split_chords),
-                          ("Also save the score as MusicXML (to fix it in MuseScore)", self.v_export)):
+        for text, var in (
+            ("Split a staff that holds two voices (e.g. S + A)", self.v_split_voices),
+            ("Split two-note chords into upper and lower parts", self.v_split_chords),
+            ("Also save the score as MusicXML (to fix it in MuseScore)", self.v_export),
+        ):
             ttk.Checkbutton(more, text=text, variable=var, style=self.switch).grid(
-                row=r, column=0, columnspan=2, sticky="w", pady=4)
+                row=r, column=0, columnspan=2, sticky="w", pady=4
+            )
             r += 1
         label("PDF reading detail")
-        self.detail_box = ttk.Combobox(more, values=list(READING_DETAIL), textvariable=self.v_detail,
-                                       state="readonly", width=18)
+        self.detail_box = ttk.Combobox(
+            more,
+            values=list(READING_DETAIL),
+            textvariable=self.v_detail,
+            state="readonly",
+            width=18,
+        )
         self.detail_box.grid(row=r, column=1, sticky="w", pady=4)
         r += 1
         ttk.Button(more, text="Reset to defaults", command=self._reset).grid(
-            row=r, column=0, columnspan=2, sticky="w", pady=(SMALL, 0))
+            row=r, column=0, columnspan=2, sticky="w", pady=(self.small_gap, 0)
+        )
         return more
 
     # ----------------------------------------------------------------- drag and drop
@@ -376,8 +586,14 @@ class App:
             return False
         try:
             from tkinterdnd2 import DND_FILES, TkinterDnD
+
             TkinterDnD._require(self.root)
-            for w in (self.zone, self.zone_title, self.zone_caption, self.engine_caption):
+            for w in (
+                self.zone,
+                self.zone_title,
+                self.zone_caption,
+                self.engine_caption,
+            ):
                 w.drop_target_register(DND_FILES)
                 w.dnd_bind("<<DropEnter>>", self._drag_enter)
                 w.dnd_bind("<<DropLeave>>", self._drag_leave)
@@ -416,8 +632,14 @@ class App:
             patterns += [p.upper() for p in patterns]
         start = Path(self.state.score).parent if self.state.score else Path.home()
         name = filedialog.askopenfilename(
-            parent=self.root, title="Choose a score", initialdir=str(start),
-            filetypes=[("Scores", tuple(f"*{p}" for p in patterns)), ("All files", "*")])
+            parent=self.root,
+            title="Choose a score",
+            initialdir=str(start),
+            filetypes=[
+                ("Scores", tuple(f"*{p}" for p in patterns)),
+                ("All files", "*"),
+            ],
+        )
         if name:
             self._set_score(Path(name))
 
@@ -426,7 +648,9 @@ class App:
             self._message(f"{path} doesn't exist.", error=True)
             return
         if not supported(path):
-            self._message(f"{path.name} isn't a score file choirsplit can read.", error=True)
+            self._message(
+                f"{path.name} isn't a score file choirsplit can read.", error=True
+            )
             return
         self.state.score = str(path)
         self.state.output = ""
@@ -452,7 +676,9 @@ class App:
             self.choose_button.configure(text="Change…")
             self.clear_button.grid()
         else:
-            self.zone_title.configure(text="Drop your score here" if self.dnd else "Choose a score to start")
+            self.zone_title.configure(
+                text="Drop your score here" if self.dnd else "Choose a score to start"
+            )
             self.zone_caption.configure(text=kinds)
             self.choose_button.configure(text="Choose file…")
             self.clear_button.grid_remove()
@@ -467,8 +693,11 @@ class App:
 
     def _choose_output(self) -> None:
         start = self.v_output.get() or str(Path.home())
-        folder = filedialog.askdirectory(parent=self.root, title="Save the tracks in",
-                                         initialdir=str(Path(start).parent if not Path(start).exists() else start))
+        folder = filedialog.askdirectory(
+            parent=self.root,
+            title="Save the tracks in",
+            initialdir=str(Path(start).parent if not Path(start).exists() else start),
+        )
         if folder:
             self.state.output = folder
             self.v_output.set(folder)
@@ -495,9 +724,16 @@ class App:
             var = tk.BooleanVar(value=True)
             self.voice_vars[name] = var
             ttk.Checkbutton(self.voice_box, text=name, variable=var).grid(
-                row=i // VOICE_COLUMNS, column=i % VOICE_COLUMNS, sticky="w", padx=(0, GAP), pady=2)
+                row=i // VOICE_COLUMNS,
+                column=i % VOICE_COLUMNS,
+                sticky="w",
+                padx=(0, self.gap),
+                pady=2,
+            )
         n = len(names)
-        self.voices_caption.configure(text=f"{title} · {_minutes(seconds)} · {n} voice{'s' * (n != 1)}")
+        self.voices_caption.configure(
+            text=f"{title} · {_minutes(seconds)} · {n} voice{'s' * (n != 1)}"
+        )
 
     # ----------------------------------------------------------------- state
 
@@ -519,7 +755,9 @@ class App:
             s.bpm = float(self.v_bpm.get().strip().replace(",", "."))
         except ValueError:
             if s.fixed_tempo:
-                raise ValueError("the fixed tempo must be a number of beats per minute") from None
+                raise ValueError(
+                    "the fixed tempo must be a number of beats per minute"
+                ) from None
         s.fmt = self.v_fmt.get()
         s.bitrate = self.v_bitrate.get()
         s.split_voices = self.v_split_voices.get()
@@ -577,8 +815,18 @@ class App:
         while todo:
             w = todo.pop()
             todo.extend(w.winfo_children())
-            if w not in skip and isinstance(w, (ttk.Button, ttk.Checkbutton, ttk.Radiobutton, ttk.Scale,
-                                                ttk.Entry, ttk.Spinbox, ttk.Combobox)):
+            if w not in skip and isinstance(
+                w,
+                (
+                    ttk.Button,
+                    ttk.Checkbutton,
+                    ttk.Radiobutton,
+                    ttk.Scale,
+                    ttk.Entry,
+                    ttk.Spinbox,
+                    ttk.Combobox,
+                ),
+            ):
                 found.append(w)
         return found
 
@@ -598,7 +846,9 @@ class App:
         want = self.root.winfo_reqheight()
         room = self.root.winfo_screenheight() - 80
         if self.root.winfo_height() < want:
-            self.root.geometry(f"{max(self.root.winfo_width(), self.root.winfo_reqwidth())}x{min(want, room)}")
+            self.root.geometry(
+                f"{max(self.root.winfo_width(), self.root.winfo_reqwidth())}x{min(want, room)}"
+            )
 
     # ----------------------------------------------------------------- running
 
@@ -615,7 +865,11 @@ class App:
             save_settings(state)
         self._hide_results()
         self.started = time.monotonic()
-        first = {"voices": "Finding the voices…", "check": "Checking the score…", "make": "Starting…"}[kind]
+        first = {
+            "voices": "Finding the voices…",
+            "check": "Checking the score…",
+            "make": "Starting…",
+        }[kind]
         if score.suffix.lower() in OMR_SUFFIXES:
             first += " Reading a PDF or photo can take a few minutes."
         self.stage.configure(text=first)
@@ -635,7 +889,9 @@ class App:
                 self._message(f"Something went wrong: {exc}", error=True)
         if self.worker.busy and self.started:
             text = self.stage.cget("text").split("  ·  ")[0]
-            self.stage.configure(text=f"{text}  ·  {_minutes(time.monotonic() - self.started)}")
+            self.stage.configure(
+                text=f"{text}  ·  {_minutes(time.monotonic() - self.started)}"
+            )
         if self.closing and not self.worker.busy:
             self.root.destroy()
             return
@@ -650,7 +906,8 @@ class App:
         if kind == "engines":
             if not event[1]:
                 self.engine_caption.configure(
-                    text="To read PDFs and photos, install Audiveris (see INSTALL.md).")
+                    text="To read PDFs and photos, install Audiveris (see INSTALL.md)."
+                )
                 self.engine_caption.grid()
             return
         # The job's last event: let its thread end, or _sync would still see it busy and
@@ -688,39 +945,63 @@ class App:
 
     def _show_check(self, recognised: bool, issues: list) -> None:
         self.tree.delete(*self.tree.get_children())
-        issues = sorted(issues, key=lambda i: (i.bar if i.bar is not None else -1, i.voice))
+        issues = sorted(
+            issues, key=lambda i: (i.bar if i.bar is not None else -1, i.voice)
+        )
         fixed = [i for i in issues if i.kind == "fixed"]
         suspects = [i for i in issues if i.kind == "suspect"]
-        for heading, group in ((f"Repaired automatically ({len(fixed)})", fixed),
-                               (f"Please check ({len(suspects)})", suspects)):
+        for heading, group in (
+            (f"Repaired automatically ({len(fixed)})", fixed),
+            (f"Please check ({len(suspects)})", suspects),
+        ):
             if group:
-                self.tree.insert("", "end", values=("", "", "", heading), tags=("group",))
+                self.tree.insert(
+                    "", "end", values=("", "", "", heading), tags=("group",)
+                )
                 for i in group:
-                    self.tree.insert("", "end", values=(
-                        "" if i.bar is None else i.bar, i.page or "", i.voice, i.detail))
+                    self.tree.insert(
+                        "",
+                        "end",
+                        values=(
+                            "" if i.bar is None else i.bar,
+                            i.page or "",
+                            i.voice,
+                            i.detail,
+                        ),
+                    )
         if not issues:
             self._message("No problems found.", ok=True)
             return
         self.tree.grid()
         if suspects and recognised:
-            self._message("To correct them: tick \"Also save the score as MusicXML\" under More options, "
-                          "make the tracks, fix those bars in MuseScore, then open the saved file here.")
+            self._message(
+                'To correct them: tick "Also save the score as MusicXML" under More options, '
+                "make the tracks, fix those bars in MuseScore, then open the saved file here."
+            )
         elif suspects:
-            self._message("If they are mistakes: fix the bars in MuseScore, save, and open the score again.")
+            self._message(
+                "If they are mistakes: fix the bars in MuseScore, save, and open the score again."
+            )
 
     def _hide_results(self) -> None:
         for w in (self.banner, self.actions, self.open_button, self.tree):
             w.grid_remove()
 
     def _message(self, text: str, error: bool = False, ok: bool = False) -> None:
-        self.banner.configure(text=text, style="Error.TLabel" if error else "Ok.TLabel" if ok else "TLabel")
+        self.banner.configure(
+            text=text,
+            style="Error.TLabel" if error else "Ok.TLabel" if ok else "TLabel",
+        )
         self.banner.grid()
         self._fit()
 
     def _close(self) -> None:
         if self.worker.busy:
-            if not messagebox.askyesno(APP_NAME, "Tracks are still being made. Stop and quit?",
-                                       parent=self.root):
+            if not messagebox.askyesno(
+                APP_NAME,
+                "Tracks are still being made. Stop and quit?",
+                parent=self.root,
+            ):
                 return
             self.worker.cancel()
             self.closing = True  # _poll closes the window once the job has stopped
